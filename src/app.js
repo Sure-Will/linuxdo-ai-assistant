@@ -4,6 +4,8 @@ import styles from './style.css';
 
 const PREFIX = 'linuxdo-ai:v1:';
 const CONFIG_KEY = `${PREFIX}config`;
+const LAYOUT_KEY = `${PREFIX}layout`;
+const SIZE = { minHeight: 320, minWidth: 360, maxWidth: 900, step: 24 };
 const DEEPSEEK = { endpoint: 'https://api.deepseek.com/chat/completions', models: ['deepseek-flash', 'deepseek-v4-pro'] };
 const uuid = () => crypto.randomUUID();
 const clone = value => JSON.parse(JSON.stringify(value));
@@ -171,7 +173,81 @@ settings.addEventListener('submit', event => {
     setStatus('');
   } catch (error) { setStatus(error.message, true); }
 });
-panel.append(conversation, status, composer, settings, latestButton, morePopover, scopePopover, effortPopover);
+// 顶边调高度、左边调宽度、左上角同时调整；高度按可用高度比例保存，窗口变化后仍按比例显示。
+const savedLayout = readValue(LAYOUT_KEY, {});
+const layout = { ratio: Number(savedLayout?.ratio) || null, width: Number(savedLayout?.width) || null };
+const roomHeight = () => Math.max(0, innerHeight - 24);
+const maxWidth = () => Math.max(SIZE.minWidth, Math.min(SIZE.maxWidth, innerWidth - 24));
+function resizeHandle(className, axes, label) {
+  const keyboard = label ? { role: 'separator', tabindex: '0', 'aria-label': label, 'aria-orientation': axes === 'y' ? 'horizontal' : 'vertical' } : { 'aria-hidden': 'true' };
+  const handle = element('div', { class: `resize ${className}`, title: label ? `${label}（双击恢复默认）` : '拖动调整大小（双击恢复默认）', ...keyboard,
+    onPointerdown: event => startResize(event, axes), onDblclick: () => resetLayout(axes),
+    onKeydown: event => {
+      const delta = { ArrowUp: [0, 1], ArrowDown: [0, -1], ArrowLeft: [1, 0], ArrowRight: [-1, 0] }[event.key];
+      if (!delta || !label) return;
+      const [dx, dy] = axes === 'y' ? [0, delta[1]] : [delta[0], 0];
+      if (!dx && !dy) return;
+      event.preventDefault(); event.stopPropagation();
+      const rect = panel.getBoundingClientRect();
+      setPanelSize({ height: dy ? rect.height + dy * SIZE.step : null, width: dx ? rect.width + dx * SIZE.step : null }); saveLayout();
+    },
+  });
+  return handle;
+}
+const heightHandle = resizeHandle('resize-top', 'y', '调整面板高度');
+const widthHandle = resizeHandle('resize-left', 'x', '调整面板宽度');
+const cornerHandle = resizeHandle('resize-corner', 'xy');
+function applyLayout() {
+  const ratio = layout.ratio && Math.min(1, Math.max(0.1, layout.ratio));
+  panel.style.setProperty('--ai-ratio', ratio ? String(ratio) : '');
+  panel.style.setProperty('--ai-floor', ratio ? `${SIZE.minHeight}px` : '');
+  panel.style.setProperty('--ai-width', layout.width ? `${Math.min(maxWidth(), Math.max(SIZE.minWidth, layout.width))}px` : '');
+  if (!ratio) for (const name of ['--ai-ratio', '--ai-floor']) panel.style.removeProperty(name);
+  if (!layout.width) panel.style.removeProperty('--ai-width');
+  const rect = panel.getBoundingClientRect();
+  for (const [handle, value, min, max] of [[heightHandle, rect.height, SIZE.minHeight, roomHeight()], [widthHandle, rect.width, SIZE.minWidth, maxWidth()]]) {
+    handle.setAttribute('aria-valuenow', String(Math.round(value))); handle.setAttribute('aria-valuemin', String(min)); handle.setAttribute('aria-valuemax', String(Math.round(max)));
+  }
+}
+function setPanelSize({ height = null, width = null }) {
+  if (height !== null) layout.ratio = Math.min(roomHeight(), Math.max(SIZE.minHeight, height)) / (roomHeight() || 1);
+  if (width !== null) layout.width = Math.round(Math.min(maxWidth(), Math.max(SIZE.minWidth, width)));
+  applyLayout();
+  if (width !== null) resizeComposer();
+  updateLatest();
+}
+function saveLayout() {
+  try { GM_setValue(LAYOUT_KEY, { ratio: layout.ratio, width: layout.width }); }
+  catch { setStatus('面板大小保存失败，刷新后会恢复默认。', true); }
+}
+function resetLayout(axes) {
+  if (axes.includes('y')) layout.ratio = null;
+  if (axes.includes('x')) layout.width = null;
+  applyLayout(); resizeComposer(); updateLatest(); saveLayout();
+}
+function startResize(event, axes) {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  const handle = event.currentTarget, rect = panel.getBoundingClientRect(), cursor = getComputedStyle(handle).cursor;
+  handle.setPointerCapture(event.pointerId);
+  panel.setAttribute('data-resizing', ''); document.documentElement.style.cursor = cursor;
+  let last = event, frame = 0;
+  // 按帧合并指针移动，松手时才写入存储。
+  const apply = () => {
+    frame = 0;
+    // 按拖动距离计算，按下位置不在边缘线上也不会跳动。
+    setPanelSize({ height: axes.includes('y') ? rect.height + event.clientY - last.clientY : null, width: axes.includes('x') ? rect.width + event.clientX - last.clientX : null });
+  };
+  const move = moveEvent => { last = moveEvent; frame ||= requestAnimationFrame(apply); };
+  const end = () => {
+    cancelAnimationFrame(frame); apply();
+    handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', end); handle.removeEventListener('pointercancel', end);
+    panel.removeAttribute('data-resizing'); document.documentElement.style.cursor = '';
+    saveLayout();
+  };
+  handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', end); handle.addEventListener('pointercancel', end);
+}
+panel.append(conversation, status, composer, settings, latestButton, morePopover, scopePopover, effortPopover, heightHandle, widthHandle, cornerHandle);
 root.append(launcher, panel);
 document.body.append(host);
 root.addEventListener('keydown', event => {
@@ -318,7 +394,7 @@ function openPanel(instant = false) {
   lastTrigger = document.activeElement; state.open = true; panel.hidden = false; launcher.hidden = true;
   if (closing && state.view === 'settings') setView('chat');
   timelineButton?.setAttribute('aria-expanded', 'true'); launcher.setAttribute('aria-expanded', 'true');
-  refreshControls(); resizeComposer(); scrollLatest(); panel.focus();
+  applyLayout(); refreshControls(); resizeComposer(); scrollLatest(); panel.focus();
 }
 // 点击关闭时淡出 150ms；Esc、键盘操作和减弱动态效果时立即隐藏。
 function closePanel({ instant = false } = {}) {
@@ -582,7 +658,7 @@ window.addEventListener('pageshow', scheduleReconcile);
 window.addEventListener('scroll', scheduleReconcile, { passive: true });
 window.addEventListener('resize', scheduleReconcile, { passive: true });
 // 输入框高度取决于宽度，窗口变化后按新宽度重算，避免停留在窄窗口时撑高的高度。
-window.addEventListener('resize', () => { if (state.open && state.view === 'chat') resizeComposer(); }, { passive: true });
+window.addEventListener('resize', () => { applyLayout(); if (state.open && state.view === 'chat') resizeComposer(); }, { passive: true });
 window.navigation?.addEventListener('navigatesuccess', scheduleReconcile);
 window.addEventListener('pagehide', () => {
   cancelProbe();

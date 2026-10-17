@@ -409,6 +409,43 @@ test('动效开启时浮层为毛玻璃，点击关闭先淡出，Esc 立即关�
   assert.equal(await hidden(), true, 'Esc 关闭不播放动画');
 });
 
+test('拖动顶边调高度、左边调宽度，有上下限，可双击恢复、键盘调整并在刷新后保留', async t => {
+  const page = await setup(t, { width: 1280, height: 900 }, { settings: false });
+  const panel = page.locator('#linuxdo-ai-root .panel');
+  const box = () => panel.boundingBox();
+  const drag = async (selector, dx, dy) => {
+    const handle = await page.locator(`#linuxdo-ai-root ${selector}`).boundingBox();
+    const x = handle.x + handle.width / 2, y = handle.y + handle.height / 2;
+    await page.mouse.move(x, y); await page.mouse.down();
+    await page.mouse.move(x + dx / 2, y + dy / 2); await page.mouse.move(x + dx, y + dy); await page.mouse.up();
+  };
+  const start = await box();
+  assert.ok(Math.abs(start.height - 876 * 2 / 3) <= 2);
+  await drag('.resize-top', 0, -150);
+  assert.ok(Math.abs((await box()).height - (start.height + 150)) <= 2, '向上拖动增加高度');
+  assert.ok(Math.abs((await box()).y + (await box()).height - (start.y + start.height)) <= 1, '底边保持不动');
+  await drag('.resize-top', 0, -2000);
+  assert.ok(Math.abs((await box()).height - 876) <= 2, '高度不超过可用高度');
+  await drag('.resize-top', 0, 2000);
+  assert.ok(Math.abs((await box()).height - 320) <= 2, '高度不低于 320px');
+  await drag('.resize-left', -120, 0);
+  assert.ok(Math.abs((await box()).width - 560) <= 2, '向左拖动增加宽度');
+  await drag('.resize-left', 2000, 0);
+  assert.ok(Math.abs((await box()).width - 360) <= 2, '宽度不低于 360px');
+  await drag('.resize-corner', -100, -100);
+  assert.deepEqual([Math.round((await box()).width), Math.round((await box()).height)], [460, 420]);
+  const heightHandle = page.getByRole('separator', { name: '调整面板高度', exact: true });
+  await heightHandle.focus(); await heightHandle.press('ArrowUp');
+  assert.equal(await heightHandle.getAttribute('aria-valuenow'), '444');
+  await page.reload(); await page.locator('#linuxdo-ai-topic-button').click();
+  assert.deepEqual([Math.round((await box()).width), Math.round((await box()).height)], [460, 444], '刷新后保留大小');
+  await page.locator('#linuxdo-ai-root .resize-top').dblclick();
+  await page.locator('#linuxdo-ai-root .resize-left').dblclick();
+  assert.deepEqual([Math.round((await box()).width), Math.round((await box()).height)], [440, Math.round(start.height)], '双击恢复默认');
+  await page.setViewportSize({ width: 500, height: 900 });
+  assert.equal(await page.locator('#linuxdo-ai-root .resize-top').isVisible(), false, '窄屏全屏时不提供拖动');
+});
+
 test('交互预览覆盖五种状态、菜单、主题和窄屏，所有资源均在本地', async t => {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   t.after(() => context.close());
