@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Linux.do AI · 本地验收页</title>
+  <style>
+    :root { --primary:#222; --secondary:#fff; --tertiary:#099dd7; --primary-low:#ddd; --primary-high:#666; --font-family:Inter,Arial,'PingFang SC',sans-serif; color-scheme:light; }
+    :root.dark { --primary:#ddd; --secondary:#222; --tertiary:#099dd7; --primary-low:#3e3e3e; --primary-high:#aaa; color-scheme:dark; }
+    body { margin:0; font:15px/1.8 var(--font-family); color:var(--primary); background:color-mix(in srgb,var(--secondary) 96%,var(--primary)); }
+    .fixture-notice { background:#f1dcae; color:#42331b; padding:8px 24px; font-size:12px; }
+    header { height:68px; padding:0 28px; display:flex; align-items:center; gap:24px; border-bottom:1px solid var(--primary-low); background:var(--secondary); }
+    header strong { letter-spacing:2px; } button { cursor:pointer; padding:8px 14px; border:1px solid var(--primary-low); border-radius:8px; background:var(--secondary); color:var(--primary); }
+    .shell { display:grid; grid-template-columns:160px minmax(0,740px) 130px; gap:32px; margin:32px auto; max-width:1200px; padding:0 24px; }
+    nav { color:var(--primary-high); line-height:3; } h1 { font-size:26px; line-height:1.5; margin:0 0 16px; }
+    a { color:inherit; text-decoration:none; } .category { color:var(--primary-high); font-size:13px; }
+    article { margin-top:24px; padding:24px 0; border-top:1px solid var(--primary-low); max-width:740px; }
+    article small { color:var(--primary-high); } article p { margin-block:16px; } code { background:var(--primary-low); padding:3px 6px; }
+    .topic-timeline { position:sticky; top:124px; color:var(--primary-high); }
+    .timeline-controls, .timeline-footer-controls { display:flex; gap:8px; }
+    .topic-timeline .btn { display:flex; padding:8px 10.4px; border:1px solid var(--primary-low); border-radius:4px; font-size:16px; color:var(--primary-high); }
+    .topic-timeline svg { width:16px; height:19.5px; fill:currentColor; }
+    .reader-mode-toggle { margin:0 8px 8px 0; }
+    .timeline-track { height:280px; margin:16px 0 20px 8px; padding-left:18px; border-left:2px solid var(--tertiary); font-size:13px; }
+    @media(max-width:1050px) { .shell { grid-template-columns:140px minmax(0,1fr); } .topic-navigation { display:none; } }
+    @media(max-width:700px) { .shell { display:block; margin:20px auto; } nav { display:none; } header { padding:0 16px; gap:12px; } header strong { font-size:14px; } }
+  </style>
+  <script src="/fixture.js" defer></script>
+  <script src="/linuxdo-ai.user.js" defer></script>
+  <script src="/preview-fixture.js" defer></script>
+</head>
+<body>
+  <div class="fixture-notice">本地验收用例：模拟帖子与模型响应，不连接外部 API。</div>
+  <header><strong>LINUX DO</strong><button id="go-first">话题一</button><button id="go-second">话题二</button><button id="theme-toggle">切换明暗</button></header>
+  <div class="shell"><nav>话题<br>开发调优<br>资源荟萃<br>文档共建</nav><main>
+    <div id="topic-title"><div class="title-wrapper"><h1 data-topic-id="1001"><a class="fancy-title">长帖阅读验收：47 篇帖子，分批补齐</a></h1><span class="category">开发调优 · 本地测试</span></div></div>
+    <article><small>测试楼主 · #1</small><p>这是一份明确标注的测试材料，用于检查总结是否覆盖所选楼层。</p><p>按钮应跟随话题切换。长帖通过 JSON 按需读取，不依赖屏幕上已经渲染多少回复。</p><p>先生成总结，再追问“补充第 21 楼”，检查传入模型的上下文和历史。</p></article>
+    <article><small>测试回复 · #2</small><p>流式验收包含中文、表格、代码块和超链接。关闭面板、切换话题或点击停止时，旧请求不得写入新对话。</p></article>
+    <article><small>测试回复 · #3</small><p>刷新后，模型设置与当前话题的对话应该恢复。历史记录中的旧对话也仍可打开。</p></article>
+  </main><aside class="topic-navigation"><div class="topic-timeline">
+    <div class="timeline-controls"><button class="btn no-text btn-icon icon btn-default reader-mode-toggle" title="Toggle Reader Mode (ctrl + alt + r)" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h7l2 2 2-2h7v14h-7l-2 2-2-2H3V5Zm8 3H5v9h6V8Zm2 0v9h6V7h-4l-2 1Z"/></svg></button></div>
+    <div class="timeline-track">1 / 47<br>9月 30 日</div>
+    <div class="timeline-footer-controls"><button class="btn no-text btn-icon btn-default reply-to-post" title="回复"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m10 3-9 9 9 9v-6c6 0 10 2 13 6-1-11-6-13-13-13V3Z"/></svg></button><div><button class="btn no-text btn-icon btn-default topic-notifications-tracking" title="通知"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a7 7 0 0 0-7 7v7l-2 3h18l-2-3V9a7 7 0 0 0-7-7Zm-3 19h6a3 3 0 0 1-6 0Z"/></svg></button></div></div>
+  </div></aside></div>
+</body></html>

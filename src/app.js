@@ -1,0 +1,597 @@
+import { SCOPES, EFFORTS, SUMMARY_PROMPT, topicIdFromUrl, validateConfig, isDeepSeek, selectedEffort, measureModel, collectTopic, buildMessages, streamChat, checkAbort } from './core.js';
+import { element, aiIcon, uiIcon, renderMarkdown, htmlToText } from './render.js';
+import styles from './style.css';
+
+const PREFIX = 'linuxdo-ai:v1:';
+const CONFIG_KEY = `${PREFIX}config`;
+const DEEPSEEK = { endpoint: 'https://api.deepseek.com/chat/completions', models: ['deepseek-flash', 'deepseek-v4-pro'] };
+const uuid = () => crypto.randomUUID();
+const clone = value => JSON.parse(JSON.stringify(value));
+const labels = { first: '仅首帖', '5': '前 5 帖', '10': '前 10 帖', '20': '前 20 帖', all: '全部帖子' };
+const state = { topicId: null, record: null, session: null, task: null, probe: null, config: {}, context: null, open: false, view: 'chat', popover: null };
+const nodes = new Map();
+let storageNotice = '', scheduled = false, timelineButton, lastTrigger, closeTimer;
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+
+function readValue(key, fallback) {
+  try { return GM_getValue(key, fallback); }
+  catch { storageNotice = '无法读取本地设置，请检查油猴是否允许运行此脚本。'; return fallback; }
+}
+const savedConfig = readValue(CONFIG_KEY, {});
+state.config = savedConfig && typeof savedConfig === 'object' && !Array.isArray(savedConfig) ? savedConfig : {};
+
+const host = element('div', { id: 'linuxdo-ai-root', lang: 'zh-CN' });
+const root = host.attachShadow({ mode: 'open' });
+root.append(element('style', { text: styles }));
+const launcher = element('button', { class: 'launcher', title: 'AI 总结', 'aria-label': 'AI 总结', 'aria-expanded': 'false', hidden: true, onClick: activate }, [aiIcon()]);
+const pageStyle = element('style', { text: `
+  .timeline-controls:has(> #linuxdo-ai-topic-button) { column-gap: 8px; }
+  .timeline-controls:has(> #linuxdo-ai-topic-button) > .reader-mode-toggle { margin-inline-end: 0; }
+  #linuxdo-ai-topic-button { margin: 0; width: var(--linuxdo-ai-width); height: var(--linuxdo-ai-height); padding: 0; flex: none; align-items: center; justify-content: center; }
+  #linuxdo-ai-topic-button .linuxdo-ai-icon { width: 1em; height: 1em; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  #linuxdo-ai-topic-button[aria-expanded="true"] { color: var(--tertiary); }
+  @media (pointer: fine) { #linuxdo-ai-topic-button:active { transform: translateY(1px); } }
+` });
+document.head.append(pageStyle);
+const panel = element('aside', { class: 'panel', role: 'dialog', 'aria-label': '话题总结', 'aria-busy': 'false', tabindex: '-1', hidden: true });
+function iconButton(label, icon, onClick, attrs = {}) {
+  return element('button', { type: 'button', class: 'quiet icon-button', title: label, 'aria-label': label, onClick, ...attrs }, [uiIcon(icon)]);
+}
+const panelTitle = element('strong', { text: '话题总结' });
+const backButton = iconButton('返回对话', 'back', () => setView('chat'), { hidden: true });
+const moreButton = iconButton('更多操作', 'more', event => togglePopover('more', event), { 'aria-expanded': 'false', 'aria-controls': 'more-menu' });
+const settingsButton = element('button', { class: 'menu-item', type: 'button', 'aria-label': '模型设置', onClick: () => setView('settings') }, [uiIcon('settings'), element('span', { text: '模型设置' })]);
+const closeButton = iconButton('关闭 AI 面板', 'close', event => closePanel({ instant: event.detail === 0 }));
+panel.append(element('header', { class: 'head' }, [
+  element('div', { class: 'head-row' }, [element('div', { class: 'brand' }, [backButton, panelTitle]), element('div', { class: 'actions' }, [moreButton, closeButton])]),
+]));
+const scopeOptions = ['first', '5', '10', '20', 'all'].map(value => element('button', {
+  class: 'menu-item option-item', type: 'button', role: 'menuitemradio', 'aria-checked': 'false', 'data-value': value,
+  onClick: () => {
+    if (state.task || !state.session) return;
+    state.session.scope = value; state.context = null; persist(); refreshControls(); setStatus(''); closePopover(true);
+  },
+}, [element('span', { text: labels[value] }), uiIcon('check')]));
+const refreshButton = element('button', { class: 'quiet refresh-action', type: 'button', 'aria-label': '更新帖子上下文', onClick: () => { closePopover(); void refreshContext(); } }, [uiIcon('refresh'), element('span', { text: '更新原文' })]);
+const newButton = element('button', { class: 'menu-item', type: 'button', onClick: () => {
+  if (!state.record || state.task) return;
+  closePopover();
+  if (!state.session.messages.length) { questionInput.focus(); return; }
+  const next = newSession(state.session.scope);
+  state.record.sessions.unshift(next); state.record.activeId = next.id; state.session = next;
+  state.context = null; questionInput.value = ''; resizeComposer(); persist(); renderMessages(); refreshControls(); setStatus(''); questionInput.focus();
+} }, [uiIcon('plus'), element('span', { text: '新对话' })]);
+const historyButton = element('button', { class: 'menu-item', type: 'button', 'aria-expanded': 'false', 'aria-controls': 'conversation-history', onClick: () => {
+  historyBox.hidden = !historyBox.hidden; historyButton.setAttribute('aria-expanded', String(!historyBox.hidden)); fillHistory(); if (!historyBox.hidden) historySelect.focus();
+} }, [uiIcon('history'), element('span', { text: '历史' })]);
+const contextMeta = element('span', { class: 'context-count' });
+const modelMeta = element('span', { class: 'menu-model' });
+const historySelect = element('select', { 'aria-label': '选择历史对话', onChange: () => {
+  const session = state.record?.sessions.find(item => item.id === historySelect.value);
+  if (!session || state.task) return;
+  state.record.activeId = session.id; state.session = session; state.context = null; questionInput.value = '';
+  resizeComposer(); persist(); renderMessages(); scrollLatest(); refreshControls(); setStatus(''); closePopover(true);
+} });
+const historyBox = element('div', { class: 'history', id: 'conversation-history', hidden: true }, [historySelect]);
+const morePopover = element('div', { class: 'popover more-popover', id: 'more-menu', hidden: true }, [newButton, historyButton, historyBox, settingsButton, modelMeta]);
+const scopeLabel = element('span');
+const scopeButton = element('button', { class: 'quiet scope-button', type: 'button', 'aria-label': '选择阅读范围', title: '选择阅读范围', 'aria-expanded': 'false', 'aria-haspopup': 'menu', 'aria-controls': 'scope-menu', onClick: event => togglePopover('scope', event) }, [scopeLabel, uiIcon('down')]);
+const scopePopover = element('div', { class: 'popover scope-popover', id: 'scope-menu', hidden: true }, [
+  element('div', { role: 'menu', 'aria-label': '阅读范围' }, scopeOptions),
+  element('div', { class: 'scope-footer' }, [contextMeta, refreshButton]),
+]);
+const effortLabel = element('span');
+const effortButton = element('button', { class: 'quiet effort-button', type: 'button', 'aria-label': '选择思考强度', title: '选择思考强度', 'aria-expanded': 'false', 'aria-haspopup': 'menu', 'aria-controls': 'effort-menu', onClick: event => togglePopover('effort', event) }, [effortLabel, uiIcon('down')]);
+const effortOptions = Object.entries(EFFORTS).map(([value, label]) => element('button', {
+  class: 'menu-item option-item', type: 'button', role: 'menuitemradio', 'aria-checked': 'false', 'data-value': value,
+  onClick: () => {
+    if (state.task) return;
+    try {
+      const config = { ...state.config, effort: value };
+      GM_setValue(CONFIG_KEY, config); state.config = config; refreshControls(); closePopover(true);
+    } catch { setStatus('思考强度保存失败，请重试。', true); }
+  },
+}, [element('span', { text: label }), uiIcon('check')]));
+const effortPopover = element('div', { class: 'popover effort-popover', id: 'effort-menu', hidden: true }, [
+  element('span', { class: 'menu-caption', text: '思考强度' }), element('div', { role: 'menu', 'aria-label': '思考强度' }, effortOptions),
+]);
+const status = element('p', { class: 'status', role: 'status', 'aria-live': 'polite', hidden: true });
+const conversation = element('div', { class: 'conversation', 'aria-label': '对话内容', tabindex: '0' });
+const latestButton = element('button', { class: 'latest', type: 'button', title: '回到最新', 'aria-label': '回到最新', hidden: true, onClick: scrollLatest }, [uiIcon('latest')]);
+conversation.addEventListener('scroll', updateLatest);
+const questionInput = element('textarea', { rows: '1', placeholder: '留空总结，或输入问题…', 'aria-label': '向 AI 提问', maxlength: '20000' });
+questionInput.addEventListener('input', () => { resizeComposer(); updateSendButton(); });
+questionInput.addEventListener('keydown', event => {
+  if (event.key === 'Enter' && !event.shiftKey && !event.altKey && !event.isComposing && event.keyCode !== 229) {
+    event.preventDefault(); event.stopPropagation(); if (!state.task) void submitQuestion();
+  }
+});
+const sendButton = element('button', { class: 'icon-button send-button', type: 'submit', 'aria-label': '总结这个话题', title: '总结这个话题（Enter 发送，Shift + Enter 换行）' }, [uiIcon('send')]);
+const stopButton = iconButton('停止', 'stop', () => state.task?.controller.abort(), { class: 'icon-button send-button', hidden: true });
+const composer = element('form', { class: 'composer', onSubmit: event => { event.preventDefault(); void submitQuestion(); } }, [
+  element('div', { class: 'composer-box' }, [questionInput, element('div', { class: 'composer-actions' }, [
+    element('div', { class: 'actions composer-tools' }, [scopeButton, effortButton]),
+    // 两个按钮叠放在同一底色上，切换时只有图标交替。
+    element('div', { class: 'send-slot' }, [stopButton, sendButton]),
+  ])]),
+]);
+const settings = element('form', { class: 'settings', autocomplete: 'off', hidden: true });
+const providerSelect = element('select', {}, [element('option', { value: 'deepseek', text: 'DeepSeek 官方' }), element('option', { value: 'custom', text: '自定义' })]);
+const endpointInput = element('input', { type: 'url', required: true, placeholder: 'https://api.example.com/v1', autocomplete: 'off', spellcheck: 'false' });
+const keyInput = element('input', { type: 'password', required: true, autocomplete: 'off', spellcheck: 'false', 'data-1p-ignore': true, 'data-lpignore': 'true' });
+const modelInput = element('input', { type: 'text', required: true, placeholder: '填写 API 使用的模型名', autocomplete: 'off', spellcheck: 'false' });
+const deepseekModel = element('select', {}, [element('option', { value: DEEPSEEK.models[0], text: 'DeepSeek Flash' }), element('option', { value: DEEPSEEK.models[1], text: 'DeepSeek V4 Pro' }), element('option', { value: 'custom', text: '自定义模型名…' })]);
+function field(title, input) {
+  input.setAttribute('aria-label', title);
+  return element('label', { class: 'field' }, [element('span', { text: title }), input]);
+}
+const endpointField = field('API 地址', endpointInput);
+const modelField = field('模型名', modelInput);
+const deepseekField = field('模型', deepseekModel);
+const saveButton = element('button', { type: 'submit', class: 'primary', text: '保存' });
+const testButton = element('button', { type: 'button', class: 'quiet', text: '模型测速', onClick: () => void testModel() });
+const testResult = element('div', { class: 'test-result', 'aria-live': 'polite', hidden: true });
+settings.append(field('供应商', providerSelect), endpointField, field('API Key', keyInput), deepseekField, modelField,
+  element('div', { class: 'actions settings-actions' }, [testButton, saveButton]), testResult);
+function savedProvider() {
+  if (!state.config.endpoint) return 'deepseek';
+  try {
+    const url = new URL(state.config.endpoint);
+    if (url.origin === 'https://api.deepseek.com' && ['/chat/completions', '/v1/chat/completions', '/v1', '/', ''].includes(url.pathname)) return 'deepseek';
+  } catch { /* 旧配置保留在自定义表单中修正。 */ }
+  return 'custom';
+}
+function showProviderFields() {
+  const official = providerSelect.value === 'deepseek';
+  endpointField.hidden = endpointInput.disabled = official;
+  modelField.hidden = modelInput.disabled = official && deepseekModel.value !== 'custom';
+  deepseekField.hidden = !official;
+  deepseekModel.disabled = !official;
+}
+providerSelect.addEventListener('change', () => { keyInput.value = ''; showProviderFields(); setStatus(''); });
+deepseekModel.addEventListener('change', () => { showProviderFields(); if (!modelField.hidden) modelInput.focus(); });
+settings.addEventListener('input', () => { testResult.hidden = true; });
+function draftConfig() {
+  const official = providerSelect.value === 'deepseek';
+  const config = validateConfig({ endpoint: official ? DEEPSEEK.endpoint : endpointInput.value, key: keyInput.value,
+    model: official && deepseekModel.value !== 'custom' ? deepseekModel.value : modelInput.value,
+  });
+  // 更换为未知接口时从“默认”开始，避免沿用 DeepSeek 的专属参数。
+  if (isDeepSeek(config) || (config.endpoint === state.config.endpoint && config.model === state.config.model)) {
+    config.effort = selectedEffort({ ...config, effort: state.config.effort });
+  }
+  return config;
+}
+settings.addEventListener('submit', event => {
+  event.preventDefault();
+  if (state.probe) return;
+  try {
+    const config = draftConfig();
+    GM_setValue(CONFIG_KEY, config); state.config = config; keyInput.value = ''; setView('chat'); refreshControls();
+    setStatus('');
+  } catch (error) { setStatus(error.message, true); }
+});
+panel.append(conversation, status, composer, settings, latestButton, morePopover, scopePopover, effortPopover);
+root.append(launcher, panel);
+document.body.append(host);
+root.addEventListener('keydown', event => {
+  if (event.key === 'Escape') {
+    event.preventDefault(); event.stopPropagation();
+    if (state.popover) closePopover(true);
+    else if (state.view === 'settings') setView('chat');
+    else closePanel({ instant: true });
+  }
+});
+document.addEventListener('pointerdown', event => {
+  if (!state.popover) return;
+  const path = event.composedPath();
+  const [popover, trigger] = popoverParts(state.popover);
+  if (!path.includes(popover) && !path.includes(trigger)) closePopover();
+});
+for (const [menu, options] of [[scopePopover, scopeOptions], [effortPopover, effortOptions]]) {
+  menu.addEventListener('keydown', event => {
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault(); event.stopPropagation();
+    const available = options.filter(option => !option.hidden && !option.disabled);
+    const current = available.indexOf(root.activeElement);
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? available.length - 1
+      : (current + (event.key === 'ArrowDown' ? 1 : -1) + available.length) % available.length;
+    available[next]?.focus();
+  });
+}
+
+function updateSendButton() {
+  const label = questionInput.value.trim() ? '发送问题' : '总结这个话题';
+  sendButton.disabled = Boolean(state.task);
+  sendButton.setAttribute('aria-label', label); sendButton.title = `${label}（Enter 发送，Shift + Enter 换行）`;
+}
+function submitQuestion() { return send(questionInput.value.trim() || SUMMARY_PROMPT); }
+
+function setTesting(busy) {
+  for (const input of [providerSelect, endpointInput, keyInput, modelInput, deepseekModel, saveButton]) input.disabled = busy;
+  testButton.textContent = busy ? '停止测速' : '模型测速';
+  testResult.setAttribute('aria-busy', String(busy));
+  if (!busy) showProviderFields();
+}
+function cancelProbe() {
+  state.probe?.controller.abort(); state.probe = null; setTesting(false);
+}
+async function testModel() {
+  if (state.probe) { state.probe.controller.abort(); return; }
+  let config;
+  try { config = draftConfig(); } catch (error) { setStatus(error.message, true); return; }
+  setStatus('');
+  const probe = { controller: new AbortController() }; state.probe = probe;
+  const note = isDeepSeek(config) ? '短文本测速 · 已关闭思考' : '短文本测速';
+  testResult.hidden = false; testResult.dataset.state = 'running'; testResult.textContent = `正在连接 ${config.model}…`;
+  setTesting(true);
+  const seconds = value => `${(value / 1000).toFixed(2)} 秒`;
+  try {
+    const result = await measureModel({ config, signal: probe.controller.signal, request: options => GM_xmlhttpRequest(options),
+      onProgress: ({ firstMs }) => { if (state.probe === probe) testResult.textContent = `首字 ${seconds(firstMs)}，正在测量生成速度…`; },
+    });
+    if (state.probe !== probe) return;
+    testResult.dataset.state = 'complete';
+    const metric = (label, value) => element('div', {}, [element('span', { text: label }), element('strong', { text: value })]);
+    testResult.replaceChildren(
+      element('div', { class: 'test-model', text: `${config.model} · 已连通` }),
+      element('div', { class: 'test-metrics' }, [metric('首字耗时', seconds(result.firstMs)), metric('生成速度', result.rate === null ? '未提供流式数据' : `${result.rate.toFixed(1)} ${result.unit}`), metric('总耗时', seconds(result.totalMs))]),
+      element('div', { class: 'test-note', text: `${note}${result.rate !== null && result.tokens === null ? ' · 未返回 token 用量，以字符计速' : ''}` }),
+    );
+  } catch (error) {
+    if (state.probe !== probe) return;
+    testResult.dataset.state = error.name === 'AbortError' ? 'stopped' : 'error';
+    testResult.textContent = error.name === 'AbortError' ? '已停止测速' : String(error.message || '测速失败。').split(config.key).join('[已隐藏]');
+  } finally {
+    if (state.probe === probe) { state.probe = null; setTesting(false); }
+  }
+}
+
+function resizeComposer() {
+  questionInput.style.height = 'auto';
+  questionInput.style.height = `${Math.min(160, Math.max(40, questionInput.scrollHeight))}px`;
+  const height = composer.getBoundingClientRect().height;
+  if (height) panel.style.setProperty('--ai-composer-height', `${height}px`);
+}
+function popoverParts(name) { return { more: [morePopover, moreButton], scope: [scopePopover, scopeButton], effort: [effortPopover, effortButton] }[name] || []; }
+function closePopover(restoreFocus = false) {
+  const [, trigger] = popoverParts(state.popover);
+  morePopover.hidden = scopePopover.hidden = effortPopover.hidden = historyBox.hidden = true;
+  for (const button of [moreButton, scopeButton, effortButton, historyButton]) button.setAttribute('aria-expanded', 'false');
+  state.popover = null;
+  if (restoreFocus) trigger?.focus();
+}
+function togglePopover(name, event) {
+  if (state.task) return;
+  if (state.popover === name) { closePopover(true); return; }
+  closePopover(); state.popover = name;
+  const [popover, trigger] = popoverParts(name);
+  // 键盘触发（detail 为 0）的状态变化不播放动画。
+  popover.toggleAttribute('data-instant', event?.detail === 0); popover.hidden = false; trigger.setAttribute('aria-expanded', 'true');
+  (name === 'more' ? newButton : popover.querySelector('[aria-checked="true"]') || popover.querySelector('button:not([hidden])'))?.focus();
+}
+
+function newSession(scope = '5') { return { id: uuid(), createdAt: Date.now(), scope, messages: [] }; }
+function loadRecord(topicId) {
+  const saved = readValue(`${PREFIX}topic:${topicId}`, null);
+  const sessions = Array.isArray(saved?.sessions) ? saved.sessions.filter(session => session?.id && Array.isArray(session.messages)).map(session => ({
+    ...session, createdAt: Number.isFinite(session.createdAt) ? session.createdAt : Date.now(), scope: Object.hasOwn(SCOPES, session.scope) ? session.scope : '5',
+    messages: session.messages.filter(m => ['user', 'assistant'].includes(m.role) && typeof m.content === 'string').map(m => ({
+      ...m, status: m.status === 'generating' ? 'stopped' : m.status,
+      error: m.status === 'generating' ? '上次生成被中断，已保留当时收到的内容。' : m.error,
+    })),
+  })) : [];
+  if (!sessions.length) sessions.push(newSession());
+  return { version: 1, title: typeof saved?.title === 'string' ? saved.title : '', sessions,
+    activeId: sessions.some(s => s.id === saved?.activeId) ? saved.activeId : sessions[0].id };
+}
+function persist(record = state.record, topicId = state.topicId) {
+  if (!record || !topicId) return;
+  try { GM_setValue(`${PREFIX}topic:${topicId}`, clone(record)); }
+  catch { storageNotice = '本地保存失败，对话暂时仍在当前窗口。请检查浏览器存储空间。'; setStatus(storageNotice, true); }
+}
+function setStatus(text, error = false) {
+  status.textContent = storageNotice || text; status.classList.toggle('error', error || Boolean(storageNotice));
+  status.hidden = !status.textContent;
+}
+function setView(view) {
+  if (view === 'settings' && state.task) return;
+  cancelProbe(); testResult.hidden = true;
+  state.view = view;
+  const chat = view === 'chat';
+  closePopover();
+  conversation.hidden = !chat; composer.hidden = !chat; settings.hidden = chat;
+  moreButton.hidden = !chat; backButton.hidden = chat; panelTitle.textContent = chat ? '话题总结' : '模型设置'; panelTitle.title = chat ? state.record?.title || '' : '';
+  updateLatest();
+  setStatus('');
+  if (!chat) {
+    providerSelect.value = savedProvider();
+    endpointInput.value = state.config.endpoint || ''; keyInput.value = state.config.key || ''; modelInput.value = state.config.model || '';
+    deepseekModel.value = DEEPSEEK.models.includes(state.config.model) ? state.config.model : state.config.model && savedProvider() === 'deepseek' ? 'custom' : DEEPSEEK.models[0];
+    showProviderFields(); keyInput.focus();
+  } else { keyInput.value = ''; if (state.open) questionInput.focus(); resizeComposer(); scrollLatest(); }
+}
+function openPanel(instant = false) {
+  if (!state.topicId) return;
+  const closing = panel.hasAttribute('data-closing');
+  clearTimeout(closeTimer); panel.removeAttribute('data-closing'); panel.toggleAttribute('data-instant', instant);
+  lastTrigger = document.activeElement; state.open = true; panel.hidden = false; launcher.hidden = true;
+  if (closing && state.view === 'settings') setView('chat');
+  timelineButton?.setAttribute('aria-expanded', 'true'); launcher.setAttribute('aria-expanded', 'true');
+  refreshControls(); resizeComposer(); scrollLatest(); panel.focus();
+}
+// 点击关闭时淡出 150ms；Esc、键盘操作和减弱动态效果时立即隐藏。
+function closePanel({ instant = false } = {}) {
+  state.task?.controller.abort(); cancelProbe(); state.open = false; keyInput.value = '';
+  closePopover();
+  const finish = () => {
+    clearTimeout(closeTimer); panel.removeAttribute('data-closing');
+    if (state.open) return;
+    panel.hidden = true;
+    if (state.view === 'settings') setView('chat');
+  };
+  if (instant || panel.hidden || reduceMotion.matches) finish();
+  else { panel.removeAttribute('data-instant'); panel.setAttribute('data-closing', ''); closeTimer = setTimeout(finish, 150); }
+  lastTrigger?.isConnected && lastTrigger.focus(); reconcile();
+}
+function activate(event) {
+  openPanel(event?.detail === 0);
+}
+// 生成过程中不自动滚动；只在打开、切换对话或点击按钮时跳到最新。
+function scrollLatest() {
+  conversation.scrollTop = conversation.scrollHeight; updateLatest();
+}
+function updateLatest() {
+  latestButton.hidden = !state.open || state.view !== 'chat' || conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight < 24;
+}
+// 新问题滚到顶部，并为回答预留一屏高度，回答在原地向下生成。
+function pinQuestion(question, answer) {
+  const style = getComputedStyle(conversation);
+  const padding = parseFloat(style.paddingTop) || 0, bottom = parseFloat(style.paddingBottom) || 0;
+  // 状态条在回答开始后隐藏，预留高度按隐藏后的对话区计算，避免届时位置被修正。
+  const height = conversation.clientHeight + (status.hidden ? 0 : status.offsetHeight);
+  answer.style.minHeight = `${Math.max(0, height - question.offsetHeight - padding - bottom)}px`;
+  conversation.scrollTop += question.getBoundingClientRect().top - conversation.getBoundingClientRect().top - padding;
+  updateLatest();
+}
+function swapIcon(name) {
+  const icon = uiIcon(name); icon.classList.add('swap-in'); return icon;
+}
+function selectingIn(node) {
+  const selection = root.getSelection?.() || document.getSelection();
+  return Boolean(selection?.rangeCount && !selection.isCollapsed && node.contains(selection.getRangeAt(0).commonAncestorContainer));
+}
+// 重绘会替换回答节点，用户正在选中文字时推迟到取消选择后再补上。
+const pendingRenders = new Map();
+function renderSoon(message, delay = 80) {
+  if (pendingRenders.has(message.id)) return;
+  const flush = () => {
+    const parts = nodes.get(message.id);
+    if (parts && selectingIn(parts.body)) { pendingRenders.set(message.id, setTimeout(flush, 250)); return; }
+    pendingRenders.delete(message.id); updateMessage(message);
+  };
+  pendingRenders.set(message.id, setTimeout(flush, delay));
+}
+function fillHistory() {
+  historySelect.replaceChildren(...(state.record?.sessions || []).map(session => {
+    const first = session.messages.find(m => m.role === 'user');
+    const date = new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(session.createdAt || Date.now());
+    return element('option', { value: session.id, text: `${date} · ${(first?.content || '新对话').slice(0, 25)}` });
+  }));
+  if (state.session) historySelect.value = state.session.id;
+}
+function refreshControls() {
+  const busy = Boolean(state.task);
+  panel.setAttribute('aria-busy', String(busy));
+  for (const control of [scopeButton, effortButton, moreButton, refreshButton, newButton, historyButton, historySelect, settingsButton, questionInput, ...scopeOptions, ...effortOptions]) control.disabled = busy;
+  updateSendButton();
+  for (const parts of nodes.values()) if (parts.retry) parts.retry.disabled = busy;
+  stopButton.hidden = !busy; sendButton.hidden = busy;
+  for (const option of scopeOptions) option.setAttribute('aria-checked', String(option.dataset.value === state.session?.scope));
+  const effort = selectedEffort(state.config);
+  effortLabel.textContent = effort === 'none' ? '不思考' : effort === 'default' ? '默认思考' : `思考 · ${EFFORTS[effort]}`;
+  for (const option of effortOptions) {
+    option.setAttribute('aria-checked', String(option.dataset.value === effort));
+    option.hidden = option.dataset.value === 'default' && (!state.config.endpoint || isDeepSeek(state.config));
+  }
+  if (state.view === 'chat') panelTitle.title = state.record?.title || '';
+  scopeLabel.textContent = labels[state.session?.scope || '5'];
+  contextMeta.textContent = state.context ? `${state.context.count}/${state.context.total} 帖` : '';
+  modelMeta.textContent = state.config.model || '';
+  fillHistory();
+}
+function updateMessage(message) {
+  const parts = nodes.get(message.id); if (!parts) return;
+  parts.article.setAttribute('data-status', message.status);
+  if (message.role === 'user') parts.body.textContent = message.content === SUMMARY_PROMPT ? '总结这个话题' : message.content;
+  else parts.body.replaceChildren(message.content ? renderMarkdown(message.content) : document.createTextNode(''));
+  parts.note.textContent = message.error || (message.status === 'stopped' ? '已停止' : '');
+  if (parts.copy) {
+    parts.copy.disabled = !message.content;
+    parts.retry.hidden = message.status === 'generating' || state.session?.messages.at(-1)?.id !== message.id;
+    parts.retry.disabled = Boolean(state.task);
+  }
+  updateLatest();
+}
+function renderMessages() {
+  nodes.clear(); conversation.replaceChildren();
+  if (!state.session?.messages.length) return;
+  for (const message of state.session.messages) {
+    const body = element('div', { class: 'body' });
+    const note = element('div', { class: 'message-note' });
+    if (message.role === 'user') {
+      // 灰底气泡已表明发送者，不再单独占一行。
+      const article = element('article', { class: 'message user', 'data-message-id': message.id }, [body, note]);
+      conversation.append(article); nodes.set(message.id, { article, body, note }); updateMessage(message);
+      continue;
+    }
+    const copy = iconButton('复制这条消息', 'copy', async () => {
+      try {
+        await navigator.clipboard.writeText(message.content); copy.replaceChildren(swapIcon('check')); copy.title = '已复制';
+        setTimeout(() => { copy.replaceChildren(swapIcon('copy')); copy.title = '复制这条消息'; }, 1400);
+      } catch { setStatus('复制失败，请选中文本后复制。', true); }
+    });
+    const retry = iconButton('重新生成', 'refresh', () => {
+      if (state.task) return;
+      const index = state.session.messages.findIndex(m => m.id === message.id);
+      const user = state.session.messages[index - 1];
+      if (index === state.session.messages.length - 1 && user?.role === 'user') void send(user.content, true);
+    }, { hidden: true });
+    const name = message.model || '未知模型';
+    const article = element('article', { class: 'message assistant', 'data-message-id': message.id }, [
+      element('div', { class: 'message-head' }, [element('span', { text: name, title: message.model || '' })]),
+      element('div', { class: 'typing', 'aria-hidden': 'true' }, [element('i'), element('i'), element('i')]), body, note,
+      element('div', { class: 'actions message-actions' }, [copy, retry]),
+    ]);
+    conversation.append(article);
+    nodes.set(message.id, { article, body, note, copy, retry }); updateMessage(message);
+  }
+  updateLatest();
+}
+
+async function getJson(path, signal) {
+  checkAbort(signal);
+  const response = await fetch(path, { credentials: 'same-origin', signal, headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' } });
+  if (!response.ok) {
+    if ([401, 403].includes(response.status)) throw new Error('论坛要求重新登录或验证，请在当前 Chrome 页面完成后再试。');
+    if (response.status === 429) throw new Error('论坛暂时限流，请稍后再试。本次没有自动重试。');
+    throw new Error(`帖子读取失败（HTTP ${response.status}）。`);
+  }
+  if (!/application\/json/i.test(response.headers.get('content-type') || '')) throw new Error('论坛没有返回帖子数据，请检查当前页面是否需要登录或验证。');
+  return response.json();
+}
+
+async function refreshContext() {
+  if (state.task || !state.topicId) return;
+  const task = { topicId: state.topicId, session: state.session, record: state.record, controller: new AbortController() };
+  state.task = task; state.context = null; refreshControls(); setStatus('正在读取…');
+  try {
+    const context = await collectTopic({ topicId: task.topicId, scope: task.session.scope, getJson, toText: htmlToText, signal: task.controller.signal,
+      onProgress: (loaded, total) => { if (state.task === task) setStatus(`正在读取 ${loaded}/${total} 帖…`); } });
+    if (state.task !== task || topicIdFromUrl(location.href) !== task.topicId) return;
+    state.context = context; state.record.title = context.title; persist();
+    setStatus(`已读取 ${context.count}/${context.total} 帖`);
+  } catch (error) {
+    if (state.task === task) setStatus(error.name === 'AbortError' ? '已停止读取。' : error.message, error.name !== 'AbortError');
+  } finally { if (state.task === task) { state.task = null; refreshControls(); } }
+}
+
+async function send(rawQuestion, replaceLast = false) {
+  const question = String(rawQuestion || '').trim();
+  if (!question || state.task || !state.session || !state.topicId) return;
+  closePopover();
+  let config;
+  try { config = validateConfig(state.config); }
+  catch { openPanel(); setView('settings'); return; }
+  const task = { topicId: state.topicId, record: state.record, session: state.session, controller: new AbortController(), lastSave: 0 };
+  state.task = task; refreshControls();
+  const current = () => state.task === task && state.topicId === task.topicId && topicIdFromUrl(location.href) === task.topicId;
+  let answer;
+  try {
+    setStatus('正在读取帖子…');
+    let context = state.context;
+    if (!context || context.scope !== task.session.scope || context.topicId !== task.topicId) {
+      context = await collectTopic({ topicId: task.topicId, scope: task.session.scope, getJson, toText: htmlToText, signal: task.controller.signal,
+        onProgress: (loaded, total) => { if (current()) setStatus(`正在读取 ${loaded}/${total} 帖…`); } });
+    }
+    checkAbort(task.controller.signal);
+    if (!current()) return;
+    state.context = context; task.record.title = context.title;
+    const history = replaceLast ? task.session.messages.slice(0, -2) : task.session.messages;
+    const messages = buildMessages(context, history, question);
+    if (replaceLast) task.session.messages.splice(-2);
+    const ask = { id: uuid(), role: 'user', content: question, status: 'complete', createdAt: Date.now() };
+    answer = { id: uuid(), role: 'assistant', content: '', status: 'generating', model: config.model, createdAt: Date.now() };
+    task.session.messages.push(ask, answer); questionInput.value = ''; resizeComposer(); renderMessages(); refreshControls(); persist(task.record, task.topicId);
+    pinQuestion(nodes.get(ask.id).article, nodes.get(answer.id).article);
+    // 定位完成后再加入场动画，避免位移影响置顶计算。
+    for (const id of [ask.id, answer.id]) nodes.get(id).article.classList.add('enter');
+    setStatus(`已读取 ${context.count}/${context.total} 帖，正在生成…`);
+    await streamChat({ config, messages, request: options => GM_xmlhttpRequest(options), signal: task.controller.signal,
+      onDelta: (_delta, content) => {
+        if (!current()) { task.controller.abort(); return; }
+        if (!answer.content) setStatus('');
+        answer.content = content;
+        renderSoon(answer);
+        if (Date.now() - task.lastSave > 1200) { task.lastSave = Date.now(); persist(task.record, task.topicId); }
+      },
+      onReasoning: () => { if (current() && !answer.content) setStatus('模型正在思考…'); },
+    });
+    checkAbort(task.controller.signal); answer.status = 'complete';
+    if (current()) setStatus('');
+  } catch (error) {
+    const stopped = error.name === 'AbortError';
+    const message = stopped ? '已停止生成。' : String(error.message || '请求失败。').split(config.key).join('[已隐藏]');
+    if (answer) { answer.status = stopped ? 'stopped' : 'error'; answer.error = message; }
+    if (current()) setStatus(answer ? '' : message, !stopped && !answer);
+  } finally {
+    if (answer?.status === 'generating') answer.status = 'stopped';
+    persist(task.record, task.topicId);
+    if (state.task === task) {
+      state.task = null; refreshControls();
+      if (answer) renderSoon(answer, 0);
+    }
+  }
+}
+
+function reconcile() {
+  const id = topicIdFromUrl(location.href);
+  if (id !== state.topicId) {
+    state.task?.controller.abort(); cancelProbe(); testResult.hidden = true; state.task = null; state.context = null; state.topicId = id;
+    questionInput.value = ''; resizeComposer(); closePopover(); nodes.clear();
+    if (id) {
+      state.record = loadRecord(id); state.session = state.record.sessions.find(s => s.id === state.record.activeId);
+      renderMessages(); scrollLatest(); refreshControls(); setStatus('');
+    } else { state.record = null; state.session = null; state.open = false; }
+    panel.hidden = !state.open || !id;
+  }
+  if (!id) { launcher.hidden = true; timelineButton?.remove(); timelineButton = null; return; }
+  if (!host.isConnected) document.body.append(host);
+  const heading = document.querySelector('#topic-title h1[data-topic-id]');
+  if (heading?.dataset.topicId === id) {
+    const text = heading.querySelector('.fancy-title')?.textContent.trim() || heading.textContent.trim();
+    if (text && state.record.title !== text) { state.record.title = text; if (state.view === 'chat') panelTitle.title = text; }
+  }
+  const reader = document.querySelector('.topic-timeline .timeline-controls .reader-mode-toggle');
+  if (reader) {
+    if (!timelineButton?.isConnected || timelineButton.previousElementSibling !== reader) {
+      timelineButton?.remove();
+      timelineButton = element('button', { id: 'linuxdo-ai-topic-button', class: 'btn no-text btn-icon btn-default', title: 'AI 总结', 'aria-label': 'AI 总结', type: 'button', onClick: activate }, [aiIcon()]);
+      reader.after(timelineButton);
+    }
+    const size = reader.getBoundingClientRect();
+    if (size.width && size.height) {
+      timelineButton.style.setProperty('--linuxdo-ai-width', `${size.width}px`);
+      timelineButton.style.setProperty('--linuxdo-ai-height', `${size.height}px`);
+    }
+  } else { timelineButton?.remove(); timelineButton = null; }
+  timelineButton?.setAttribute('aria-expanded', String(state.open));
+  launcher.setAttribute('aria-expanded', String(state.open));
+  const rect = timelineButton?.isConnected ? timelineButton.getBoundingClientRect() : null;
+  const visible = rect && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth;
+  launcher.hidden = state.open || Boolean(visible);
+}
+
+function scheduleReconcile() {
+  if (scheduled) return; scheduled = true;
+  requestAnimationFrame(() => { scheduled = false; reconcile(); });
+}
+new MutationObserver(scheduleReconcile).observe(document.body, { childList: true, subtree: true });
+window.addEventListener('popstate', scheduleReconcile);
+window.addEventListener('pageshow', scheduleReconcile);
+window.addEventListener('scroll', scheduleReconcile, { passive: true });
+window.addEventListener('resize', scheduleReconcile, { passive: true });
+// 输入框高度取决于宽度，窗口变化后按新宽度重算，避免停留在窄窗口时撑高的高度。
+window.addEventListener('resize', () => { if (state.open && state.view === 'chat') resizeComposer(); }, { passive: true });
+window.navigation?.addEventListener('navigatesuccess', scheduleReconcile);
+window.addEventListener('pagehide', () => {
+  cancelProbe();
+  const task = state.task;
+  if (task) {
+    const last = task.session.messages.at(-1); if (last?.status === 'generating') last.status = 'stopped';
+    persist(task.record, task.topicId); task.controller.abort();
+  }
+});
+if (typeof GM_registerMenuCommand === 'function') GM_registerMenuCommand('Linux.do AI 设置', () => { openPanel(); setView('settings'); });
+if (typeof GM_addValueChangeListener === 'function') GM_addValueChangeListener(CONFIG_KEY, (_key, _old, value, remote) => { if (remote && !state.task && !state.probe) { state.config = value || {}; refreshControls(); } });
+reconcile();

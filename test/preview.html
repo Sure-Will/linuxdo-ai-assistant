@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Linux.do AI · 交互预览</title>
+  <style>
+    * { box-sizing:border-box; }
+    :root { color-scheme:dark; font:13px/1.5 -apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif; color:#d6d6d6; background:#171717; }
+    body { margin:0; height:100dvh; display:flex; flex-direction:column; }
+    header { flex:none; display:flex; flex-wrap:wrap; align-items:center; gap:8px 18px; min-height:64px; padding:10px 16px; border-bottom:1px solid #343434; }
+    strong { font-size:13px; font-weight:600; } small { display:block; color:#aaa; font-size:11px; }
+    nav { display:flex; flex-wrap:wrap; gap:3px; flex:1; }
+    button { font:inherit; color:inherit; min-height:40px; padding:7px 10px; border:0; border-radius:6px; background:transparent; cursor:pointer; }
+    button:hover { background:#303030; } button[aria-pressed="true"] { background:#3b3b3b; color:#fff; }
+    button:active { transform:translateY(1px); } button:focus-visible { outline:2px solid #bbb; outline-offset:2px; }
+    main { flex:1; min-height:0; display:flex; justify-content:center; overflow:hidden; background:#151515; }
+    iframe { width:100%; height:100%; border:0; background:#222; }
+    main.compact iframe { max-width:390px; border-inline:1px solid #3a3a3a; }
+    .tools { display:flex; gap:3px; }
+    .compact-note { display:none; }
+    @media(max-width:640px) { header { padding:8px 10px; gap:4px 10px; } header>div:first-child { display:none; } nav { flex-basis:100%; } .tools { width:100%; align-items:center; } .compact-note { display:block; margin-right:auto; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div><strong>界面预览</strong><small>模拟数据</small></div>
+    <nav aria-label="预览状态">
+      <button data-scene="empty">空白</button><button data-scene="conversation">对话</button><button data-scene="loading">生成中</button><button data-scene="error">错误</button><button data-scene="settings">设置</button>
+    </nav>
+    <div class="tools"><small class="compact-note">模拟数据</small><button id="theme">切换主题</button><button id="compact" aria-pressed="false">窄屏</button><button id="before" aria-pressed="false" title="切换到改动前的构建">改前</button><button id="reload">刷新</button></div>
+  </header>
+  <main><iframe title="Linux.do AI 面板预览"></iframe></main>
+  <script>
+    const frame = document.querySelector('iframe');
+    const beforeButton = document.getElementById('before');
+    let scene = 'conversation', theme = 'dark', build = 'after', stamp = null;
+    function render() {
+      document.querySelectorAll('[data-scene]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.scene === scene)));
+      beforeButton.setAttribute('aria-pressed', String(build === 'before'));
+      frame.src = `/t/topic/1001?preview=1&scene=${scene}&theme=${theme}${build === 'before' ? '&build=before' : ''}`;
+    }
+    beforeButton.onclick = () => { build = build === 'before' ? 'after' : 'before'; render(); };
+    // 构建文件更新后自动重载当前构建；查看“改前”时不打断。
+    setInterval(async () => {
+      try {
+        const info = await fetch('/build-stamp', { cache: 'no-store' }).then(response => response.json());
+        beforeButton.hidden = !info.baseline;
+        if (stamp !== null && info.stamp !== stamp && build === 'after') render();
+        stamp = info.stamp;
+      } catch { /* 预览服务停止时保持当前画面。 */ }
+    }, 1000);
+    document.querySelectorAll('[data-scene]').forEach(button => button.addEventListener('click', () => { scene = button.dataset.scene; render(); }));
+    document.getElementById('theme').onclick = () => { theme = theme === 'dark' ? 'light' : 'dark'; render(); };
+    document.getElementById('reload').onclick = render;
+    document.getElementById('compact').onclick = event => { const enabled = document.querySelector('main').classList.toggle('compact'); event.currentTarget.setAttribute('aria-pressed', String(enabled)); };
+    render();
+  </script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "preview",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["test/server.mjs"],
+      "env": { "PORT": "4717" },
+      "port": 4717
+    }
+  ]
+}
