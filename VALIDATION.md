@@ -1,6 +1,14 @@
 # 验收记录
 
-日期：2026-10-17。版本：0.1.6。
+日期：2026-10-17。版本：0.1.7。
+
+## 0.1.7 公开仓库与自动更新
+
+- 新建公开仓库 Sure-Will/linuxdo-ai-assistant，默认分支 main；提交作者为 GitHub noreply 邮箱，仓库内无 API Key。
+- 安装文件加入 @homepageURL、@updateURL、@downloadURL，后两者指向 main 分支的 dist/linuxdo-ai.user.js；推送后已确认 raw 地址返回 200。
+- 新增核心测试：安装文件的 @version 与 package.json 一致，更新地址指向 main 分支的安装文件。
+- 设置与对话历史仍保存在各电脑的 Tampermonkey 存储中，不做跨设备同步。
+- 23 项核心测试、23 项浏览器测试通过。
 
 ## 0.1.6 面板精简
 
@@ -71,8 +79,8 @@
 本机浏览器测试使用已有 Playwright Core 1.62.1 和 Chromium headless shell 1243。运行命令为：
 
 ```sh
-NODE_PATH=/Users/sure/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules \
-CHROMIUM_EXECUTABLE=/Users/sure/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell \
+NODE_PATH="$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules" \
+CHROMIUM_EXECUTABLE="$HOME/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell" \
 node --test test/browser.test.mjs
 ```
 

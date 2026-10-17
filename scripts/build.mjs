@@ -5,6 +5,9 @@ import { fileURLToPath } from 'node:url';
 const base = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = name => fs.readFile(path.join(base, name), 'utf8');
 const pkg = JSON.parse(await read('package.json'));
+// 两台电脑的篡改猴都从 main 分支的安装文件检查更新；只有 @version 变高才会更新。
+const REPO = 'https://github.com/Sure-Will/linuxdo-ai-assistant';
+const RAW = 'https://raw.githubusercontent.com/Sure-Will/linuxdo-ai-assistant/main/dist/linuxdo-ai.user.js';
 const upstream = await read('vendor/marked.esm.js');
 const exportsMatch = upstream.match(/export\{([^}]+)\};?/);
 const markedName = exportsMatch?.[1].match(/(?:^|,)\s*([\w$]+) as marked(?:,|$)/)?.[1];
@@ -19,6 +22,9 @@ const header = `// ==UserScript==
 // @version      ${pkg.version}
 // @description  自选模型，流式总结、连续追问、上下文范围和本地历史。适用于 Chrome 标签页与 PWA。
 // @author       Sure
+// @homepageURL  ${REPO}
+// @updateURL    ${RAW}
+// @downloadURL  ${RAW}
 // @match        https://linux.do/*
 // @run-at       document-idle
 // @sandbox      DOM

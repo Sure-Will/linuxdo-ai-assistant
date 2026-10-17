@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
 import { topicIdFromUrl, normalizeEndpoint, validateConfig, wantedPostIds, collectTopic, EventStreamParser, buildMessages, streamChat } from '../src/core.js';
 
 test('识别 slug、纯数字话题地址与楼层地址', () => {
@@ -185,4 +186,15 @@ test('测速遇到一次性 JSON 不伪造流式生成速度', async () => {
   const wire = JSON.stringify({ choices: [{ message: { content: '1 2 3' }, finish_reason: 'stop' }], usage: { completion_tokens: 5 } });
   const result = await measureModel({ config, now: () => times.shift(), ...mockRequest(wire, { type: 'application/json' }) });
   assert.equal(result.firstMs, 200); assert.equal(result.rate, null); assert.equal(result.tokens, 5);
+});
+
+test('安装文件的版本号与 package.json 一致，并从 main 分支自动更新', async () => {
+  const read = name => fs.readFile(new URL(`../${name}`, import.meta.url), 'utf8');
+  const pkg = JSON.parse(await read('package.json'));
+  const header = (await read('dist/linuxdo-ai.user.js')).split('// ==/UserScript==')[0];
+  const field = name => header.match(new RegExp(`^// @${name}\\s+(.+)$`, 'm'))?.[1].trim();
+  assert.equal(field('version'), pkg.version, '构建文件已过期，请先运行 npm run build');
+  const raw = 'https://raw.githubusercontent.com/Sure-Will/linuxdo-ai-assistant/main/dist/linuxdo-ai.user.js';
+  assert.equal(field('updateURL'), raw);
+  assert.equal(field('downloadURL'), raw);
 });

@@ -2,19 +2,29 @@
 
 Chrome 标签页和 Linux.do PWA 共用的油猴脚本。使用自己的 Chat Completions 兼容模型，提供流式总结、连续追问、上下文选择和本地对话历史。
 
-项目目录：`/Users/sure/repos/linuxdo-ai-assistant`。
+仓库：[Sure-Will/linuxdo-ai-assistant](https://github.com/Sure-Will/linuxdo-ai-assistant)。安装地址（Mac 与 Windows 通用）：
 
-## 安装
+```text
+https://raw.githubusercontent.com/Sure-Will/linuxdo-ai-assistant/main/dist/linuxdo-ai.user.js
+```
+
+## 安装（Mac 与 Windows 相同）
 
 1. 在创建 Linux.do PWA 的同一个 Chrome 个人资料中安装 [Tampermonkey 官方版](https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo)。
 2. Chrome 扩展详情中开启 Tampermonkey 的“允许用户脚本”。不同 Chrome 版本的入口见 [官方说明](https://www.tampermonkey.net/faq.php?q=Q209)。
-3. 打开 `dist/linuxdo-ai.user.js`，复制完整内容。在 Tampermonkey 中“添加新脚本”，替换编辑器里的默认内容，保存。
+3. 在 Chrome 中打开上面的安装地址，Tampermonkey 会显示安装页，点击“安装”。
 4. 刷新 Linux.do PWA 的页面。右侧阅读器按钮旁会出现星芒图标，悬停显示“AI 总结”；窄窗口没有右侧工具栏时，入口位于右下角。
-5. 打开面板后，点击右上角“更多操作”中的“模型设置”，填入 DeepSeek API Key 并保存。仅在手动点击右下角发送按钮时调用模型；留空总结，有文字则提问。
+5. 打开面板后，点击右上角“更多操作”中的“模型设置”，填入 API Key 并保存。仅在手动点击发送按钮时调用模型；留空总结，有文字则提问。
 
-日常运行只需要这个 `.user.js` 文件，无需 Node.js、终端或本地服务。更新时用新构建文件替换同名、同 namespace 的脚本内容，保留原油猴存储。
+日常运行只需要这个 `.user.js` 文件，无需 Node.js、终端或本地服务。
 
-已安装时，在篡改猴中打开现有的“Linux.do AI 阅读助手”，全选替换为 `dist/linuxdo-ai.user.js` 的完整内容，按 `⌘S` 保存，再回 PWA 按 `⌘R` 刷新。
+**从手动粘贴的旧版本切换**：已用复制粘贴方式安装过的电脑，打开安装地址后 Tampermonkey 会显示“更新”。名称和 namespace 不变，会覆盖原脚本并保留原有设置与历史；之后即可自动更新。
+
+## 多台电脑同步
+
+- **脚本**：安装文件带有 `@updateURL` 与 `@downloadURL`，指向 `main` 分支。推送新版本后，各电脑的 Tampermonkey 会在下次检查时自动更新（默认每天一次）；想立即更新，在 Tampermonkey 菜单中选择“检查用户脚本更新”。GitHub 原始文件有几分钟缓存。
+- **设置与历史不同步**：API Key、模型、思考强度、面板大小和对话历史保存在每台电脑各自的 Tampermonkey 存储里。新电脑需要在“模型设置”中填写一次 API Key，密钥不会上传到仓库或其他云端。
+- **在另一台电脑上开发**：克隆仓库即可，构建只需要 Node.js；只使用脚本不需要克隆。
 
 ## 模型设置
 
@@ -57,7 +67,13 @@ npm run test:browser
 
 构建脚本使用 Node.js 标准库，将源码、CSS 和已随项目保存的 Markdown 分词库合并成一个安装文件。浏览器测试需要 `playwright-core` 和 Chromium；可以用 `NODE_PATH` 指向已安装模块，用 `CHROMIUM_EXECUTABLE` 指向已有 Chromium 可执行文件。
 
-`npm run preview` 会打印一个 `/preview` 地址，打开后可切换空白、对话、生成中、错误、设置，以及明暗主题与窄屏。预览直接加载当前构建的安装脚本，使用独立的模拟存储和模型响应，不访问真实服务。服务只监听 `127.0.0.1`，仅供 UI 打磨，日常使用脚本不需要运行。源码修改后重新构建，再点击预览中的“刷新”即可。
+`npm run preview` 会打印一个 `/preview` 地址，打开后可切换空白、对话、生成中、错误、设置，以及明暗主题与窄屏。预览直接加载当前构建的安装脚本，使用独立的模拟存储和模型响应，不访问真实服务。服务只监听 `127.0.0.1`，仅供 UI 打磨，日常使用脚本不需要运行。源码修改后重新构建，预览会在一秒内自动刷新；“改前”按钮加载 `test-results/preview/baseline.user.js`（本地生成，不提交），用于对比改动前的界面。
+
+发布新版本（Tampermonkey 只在 `@version` 变高时更新，忘记升版本号两台电脑都不会更新）：
+
+1. 修改 `package.json` 的 `version`。
+2. 运行 `npm run build`、`npm test`、`npm run test:browser`。`npm test` 会检查安装文件的版本号与 `package.json` 一致，防止推送过期的构建。
+3. 提交并推送到 `main`。
 
 源码布局：
 
@@ -68,6 +84,8 @@ npm run test:browser
 - `dist/linuxdo-ai.user.js`：安装文件。
 
 ## 当前验证状态
+
+2026-10-17：0.1.7 发布到公开仓库 `main`，安装文件加入 `@updateURL` / `@downloadURL`，两台电脑通过 Tampermonkey 自动更新；新增版本一致性检查。23 项核心测试、23 项浏览器测试通过。
 
 2026-10-17：0.1.6 精简面板：头部只留一行（话题名移到标题悬停提示），用户消息去掉「你」行，回答只保留一行模型名，复制与重新生成移到回答末尾并在悬停时显示（最新一条常显），去掉空白页重复提示，输入框最小高度降到 40px，「回到最新」改为圆形图标，面板阴影减轻；窗口尺寸变化时重算输入框高度；生成时不再自动滚动，选中文字时暂停刷新；菜单与「回到最新」使用毛玻璃，面板、菜单、发送按钮加入按频率分级的动效，并适配系统的减弱动态效果；面板贴右下角，高度约为窗口的三分之二，可拖动顶边、左边或左上角调整大小，双击恢复默认。22 项核心测试、23 项浏览器测试通过；真实 PWA 需更新安装脚本。
 
