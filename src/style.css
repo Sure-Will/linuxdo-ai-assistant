@@ -29,7 +29,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .ui-icon-more { stroke-width: 3.8; }
 .ui-icon-stop { width: 15px; height: 15px; fill: currentColor; stroke-width: 0; }
 .launcher { position: fixed; right: 22px; bottom: 22px; z-index: 1001; width: 40px; height: 40px; padding: 10px; border: 1px solid var(--ai-line); background: var(--ai-bg); display: grid; place-items: center; }
-.panel { position: fixed; z-index: 1002; right: 12px; top: max(12px, env(safe-area-inset-top)); bottom: max(12px, env(safe-area-inset-bottom)); width: 440px; max-width: calc(100vw - 24px); display: flex; flex-direction: column; background: var(--ai-bg); border: 1px solid var(--ai-line); border-radius: 14px; box-shadow: 0 8px 32px #0002; overflow: hidden; }
+/* 贴右下角，高度约为可用高度的三分之二；矮窗口至少 420px，且不超出可用高度。 */
+.panel { --ai-room: calc(100dvh - max(12px, env(safe-area-inset-top)) - max(12px, env(safe-area-inset-bottom))); position: fixed; z-index: 1002; right: 12px; bottom: max(12px, env(safe-area-inset-bottom)); height: clamp(min(420px, var(--ai-room)), var(--ai-room) * 2 / 3, var(--ai-room)); width: 440px; max-width: calc(100vw - 24px); display: flex; flex-direction: column; background: var(--ai-bg); border: 1px solid var(--ai-line); border-radius: 14px; box-shadow: 0 8px 32px #0002; overflow: hidden; }
 .panel:focus-visible { outline: 1px solid var(--ai-line); outline-offset: 0; }
 .head { padding: 8px 12px 4px 16px; flex: none; }
 .head-row, .actions, .composer-actions { display: flex; align-items: center; gap: 4px; }
@@ -139,7 +140,7 @@ select { padding: 8px 10px; min-height: 40px; background: var(--ai-bg); border: 
   button:not(:disabled):active { scale: .96; }
   .menu-item:not(:disabled):active { scale: 1; background: color-mix(in srgb, var(--ai-text) 14%, var(--ai-bg)); }
   .composer-box { transition: border-color .12s; }
-  .panel { transform-origin: right center; transition: opacity .22s var(--ai-ease), transform .22s var(--ai-ease); }
+  .panel { transform-origin: right bottom; transition: opacity .22s var(--ai-ease), transform .22s var(--ai-ease); }
   .panel[data-closing] { opacity: 0; transform: translateX(8px); pointer-events: none; transition-duration: .15s; transition-timing-function: ease-in; }
   .popover { transition: opacity .14s var(--ai-ease), transform .14s var(--ai-ease); }
   .latest { transition: opacity .16s var(--ai-ease), translate .16s var(--ai-ease), scale .12s var(--ai-ease); }
@@ -167,7 +168,7 @@ select { padding: 8px 10px; min-height: 40px; background: var(--ai-bg); border: 
 @keyframes ai-swap { from { opacity: 0; scale: .25; filter: blur(4px); } }
 @keyframes ai-dot { 0%, 80%, 100% { opacity: .35; } 40% { opacity: 1; } }
 @media (max-width: 620px) {
-  .panel { inset: 0; width: 100%; max-width: none; border-radius: 0; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+  .panel { inset: 0; height: auto; width: 100%; max-width: none; border-radius: 0; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
   .launcher { right: 14px; bottom: 18px; }
 }
 @media (max-height: 500px) {

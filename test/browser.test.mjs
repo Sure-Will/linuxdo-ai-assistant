@@ -69,7 +69,10 @@ test('打开、重开、刷新及切换话题均不自动读取或总结，只�
   assert.equal(await page.evaluate(() => fixture.requests.length), 1);
   assert.equal(await page.getByRole('status').isVisible(), false, '完成后不保留状态横幅');
   const reading = await page.locator('#linuxdo-ai-root .conversation').boundingBox();
-  assert.ok(reading.height > 500, `732px 面板保留足够正文空间，实际 ${reading.height}px`);
+  const frame = await page.locator('#linuxdo-ai-root .panel').boundingBox();
+  const room = await page.evaluate(() => innerHeight - 24);
+  assert.ok(Math.abs(frame.height - room * 2 / 3) <= 2, `面板约为可用高度的三分之二，实际 ${frame.height}/${room}px`);
+  assert.ok(reading.height > frame.height * 0.6, `对话区占面板大部分空间，实际 ${reading.height}/${frame.height}px`);
   const sections = await page.locator('#linuxdo-ai-root .panel, #linuxdo-ai-root .head, #linuxdo-ai-root .conversation, #linuxdo-ai-root .composer').evaluateAll(els => els.map(el => ({ class: el.className, rect: el.getBoundingClientRect().toJSON() })));
   await fs.writeFile(path.join(resultsDir, 'panel-geometry.json'), JSON.stringify({ viewport: page.viewportSize(), sections }, null, 2));
   await page.screenshot({ path: path.join(resultsDir, 'compact-conversation-light.png') });
