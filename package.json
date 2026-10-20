@@ -1,6 +1,6 @@
 {
   "name": "linuxdo-ai-assistant",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "private": true,
   "type": "module",
   "description": "Linux.do PWA 的文字总结与连续追问助手",

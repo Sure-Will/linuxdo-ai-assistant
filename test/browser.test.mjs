@@ -278,6 +278,39 @@ test('思考过程流式展开，正文开始后收起，可回看且不发回�
   assert.match(await thinking.first().locator('summary').innerText(), /^已思考 \d+ 秒$/, '刷新后仍可回看思考过程');
 });
 
+test('导出图片入口在三个点右侧，生成浅色和深色 PNG，可复制和保存', async t => {
+  const page = await setup(t); await configure(page);
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+  const exportButton = page.getByRole('button', { name: '导出图片', exact: true });
+  assert.deepEqual(await page.locator('#linuxdo-ai-root .head .actions > button').evaluateAll(nodes => nodes.map(node => node.getAttribute('aria-label'))), ['更多操作', '导出图片', '关闭 AI 面板']);
+  assert.equal(await exportButton.isDisabled(), true, '没有完整回答时不能导出');
+  await summary(page).click(); await done(page);
+  await input(page).fill('谁更谨慎？');
+  await page.getByRole('button', { name: '发送问题', exact: true }).click(); await done(page);
+  const before = await page.evaluate(() => fixture.requests.length);
+  await exportButton.click();
+  assert.equal(await page.locator('#linuxdo-ai-root .brand strong').innerText(), '导出图片');
+  const canvas = page.locator('#linuxdo-ai-root .export-preview canvas');
+  for (const [label, rgb, file] of [['浅色', [255, 255, 255], 'export-light.png'], ['深色', [30, 30, 30], 'export-dark.png']]) {
+    await page.getByRole('button', { name: label, exact: true }).click();
+    await page.locator(`#linuxdo-ai-root .export-preview[aria-busy="false"] canvas[aria-label*="${label}"]`).waitFor();
+    assert.equal(await canvas.evaluate(node => node.width), 750, '375px 卡片按 2 倍像素输出');
+    assert.deepEqual(await canvas.evaluate(node => [...node.getContext('2d').getImageData(4, 4, 1, 1).data.slice(0, 3)]), rgb, '画布未被污染且背景正确');
+    const [download] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: '保存图片', exact: true }).click()]);
+    assert.match(download.suggestedFilename(), /^linuxdo-1001-\d{8}-\d{4}\.png$/);
+    await download.saveAs(path.join(resultsDir, file));
+  }
+  await page.getByRole('button', { name: '复制图片', exact: true }).click();
+  await page.getByRole('button', { name: '已复制', exact: true }).waitFor();
+  assert.deepEqual(await page.evaluate(async () => (await navigator.clipboard.read()).flatMap(item => item.types)), ['image/png']);
+  assert.equal(await page.evaluate(() => fixture.requests.length), before, '导出不请求模型');
+  await page.screenshot({ path: path.join(resultsDir, 'export-view.png') });
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('#linuxdo-ai-root .brand strong').innerText(), '话题总结');
+  await openSettings(page);
+  assert.equal(await exportButton.isVisible(), false, '设置页不显示导出入口');
+});
+
 test('论坛验证和模型网络错误不会触发自动重试', async t => {
   const page = await setup(t); await configure(page); await page.evaluate(() => fixture.setMode('forum-error'));
   await summary(page).click(); await page.getByRole('status').filter({ hasText: '重新登录或验证' }).waitFor();

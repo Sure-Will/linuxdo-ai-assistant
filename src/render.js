@@ -38,6 +38,9 @@ export function uiIcon(name) {
     refresh: 'M20 10a8 8 0 0 0-13.7-4L3 9m0-6v6h6m-5 5a8 8 0 0 0 13.7 4L21 15m0 6v-6h-6',
     copy: 'M9 9h11v12H9Zm-4 6H3V3h11v2',
     check: 'm5 12 4 4L19 6',
+    share: 'M12 15V4m-4 4 4-4 4 4M8 11H6v9h12v-9h-2',
+    user: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 8a7 7 0 0 1 14 0',
+    link: 'M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7',
   };
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   svg.setAttribute('viewBox', '0 0 24 24');

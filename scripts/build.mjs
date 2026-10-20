@@ -14,7 +14,7 @@ const markedName = exportsMatch?.[1].match(/(?:^|,)\s*([\w$]+) as marked(?:,|$)/
 if (!markedName) throw new Error('无法识别已固定版本的 marked 导出。');
 const vendor = `const { marked } = (() => {\n${upstream.replace(exportsMatch[0], '').replace(/^\/\/# sourceMappingURL=.*$/gm, '')}\nreturn { marked: ${markedName} };\n})();`;
 const stripModule = source => source.replace(/^import .*;\s*$/gm, '').replace(/^export /gm, '');
-const body = [vendor, stripModule(await read('src/core.js')), stripModule(await read('src/render.js')),
+const body = [vendor, stripModule(await read('src/core.js')), stripModule(await read('src/render.js')), stripModule(await read('src/share.js')),
   `const styles = ${JSON.stringify(await read('src/style.css'))};`, stripModule(await read('src/app.js'))].join('\n\n');
 const header = `// ==UserScript==
 // @name         Linux.do AI 阅读助手

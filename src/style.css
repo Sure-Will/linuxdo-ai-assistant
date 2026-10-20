@@ -143,6 +143,18 @@ select { padding: 8px 10px; min-height: 40px; background: var(--ai-bg); border: 
 .context-count { color: var(--ai-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .history { padding: 4px; }
 .history select { width: 100%; font-size: 12px; }
+/* 导出图片：上方预览实际生成的 PNG，下方选择背景并复制或保存。 */
+.exporter { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.export-preview { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 8px 16px 16px; }
+.export-preview canvas { display: block; width: min(100%, 375px); height: auto; margin: 0 auto; border-radius: 12px; box-shadow: 0 0 0 1px var(--ai-hairline), 0 4px 20px #0000001a; }
+.export-preview[aria-busy="true"] canvas { opacity: .55; }
+.export-bar { flex: none; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 16px 14px; border-top: 1px solid var(--ai-line); }
+.export-themes { display: flex; gap: 2px; }
+.theme-option { display: flex; align-items: center; gap: 6px; padding: 8px 10px; font-size: 12px; color: var(--ai-muted); }
+.theme-option[aria-pressed="true"] { color: var(--ai-text); background: var(--ai-soft); }
+.swatch { width: 14px; height: 14px; border-radius: 50%; box-shadow: inset 0 0 0 1px var(--ai-hairline); }
+.export-actions { gap: 6px; }
+.export-actions button { font-size: 13px; }
 .settings { flex: 1; overflow: auto; overscroll-behavior: contain; padding: 20px 16px; }
 .field { display: block; margin-bottom: 18px; }
 .field span { display: block; margin-bottom: 7px; font-size: 12px; }

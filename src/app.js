@@ -1,5 +1,6 @@
 import { SCOPES, EFFORTS, SUMMARY_PROMPT, topicIdFromUrl, validateConfig, isDeepSeek, selectedEffort, measureModel, collectTopic, buildMessages, streamChat, checkAbort } from './core.js';
 import { element, aiIcon, uiIcon, renderMarkdown, htmlToText } from './render.js';
+import { SHARE_THEMES, shareCard, shareTime, renderShareImage } from './share.js';
 import styles from './style.css';
 
 const PREFIX = 'linuxdo-ai:v1:';
@@ -43,9 +44,10 @@ const panelTitle = element('strong', { text: '话题总结' });
 const backButton = iconButton('返回对话', 'back', () => setView('chat'), { hidden: true });
 const moreButton = iconButton('更多操作', 'more', event => togglePopover('more', event), { 'aria-expanded': 'false', 'aria-controls': 'more-menu' });
 const settingsButton = element('button', { class: 'menu-item', type: 'button', 'aria-label': '模型设置', onClick: () => setView('settings') }, [uiIcon('settings'), element('span', { text: '模型设置' })]);
+const exportButton = iconButton('导出图片', 'share', () => setView('export'));
 const closeButton = iconButton('关闭 AI 面板', 'close', event => closePanel({ instant: event.detail === 0 }));
 panel.append(element('header', { class: 'head' }, [
-  element('div', { class: 'head-row' }, [element('div', { class: 'brand' }, [backButton, panelTitle]), element('div', { class: 'actions' }, [moreButton, closeButton])]),
+  element('div', { class: 'head-row' }, [element('div', { class: 'brand' }, [backButton, panelTitle]), element('div', { class: 'actions' }, [moreButton, exportButton, closeButton])]),
 ]));
 const scopeOptions = ['first', '5', '10', '20', 'all'].map(value => element('button', {
   class: 'menu-item option-item', type: 'button', role: 'menuitemradio', 'aria-checked': 'false', 'data-value': value,
@@ -116,6 +118,20 @@ const composer = element('form', { class: 'composer', onSubmit: event => { event
     // 两个按钮叠放在同一底色上，切换时只有图标交替。
     element('div', { class: 'send-slot' }, [stopButton, sendButton]),
   ])]),
+]);
+const shot = { theme: null, blob: null, token: 0 };
+const exportPreview = element('div', { class: 'export-preview', 'aria-busy': 'false' });
+const exportThemes = Object.entries(SHARE_THEMES).map(([value, theme]) => element('button', {
+  type: 'button', class: 'quiet theme-option', 'aria-pressed': 'false', 'data-value': value,
+  onClick: () => { if (shot.theme !== value) { shot.theme = value; void drawExport(); } },
+}, [element('i', { class: 'swatch', style: `background: ${theme.bg}` }), element('span', { text: theme.label })]));
+const copyImageButton = element('button', { type: 'button', class: 'quiet', text: '复制图片', onClick: () => void copyExport() });
+const saveImageButton = element('button', { type: 'button', class: 'primary', text: '保存图片', onClick: saveExport });
+const exporter = element('section', { class: 'exporter', 'aria-label': '导出图片', hidden: true }, [exportPreview,
+  element('div', { class: 'export-bar' }, [
+    element('div', { class: 'export-themes', role: 'group', 'aria-label': '图片背景' }, exportThemes),
+    element('div', { class: 'actions export-actions' }, [copyImageButton, saveImageButton]),
+  ]),
 ]);
 const settings = element('form', { class: 'settings', autocomplete: 'off', hidden: true });
 const providerSelect = element('select', {}, [element('option', { value: 'deepseek', text: 'DeepSeek 官方' }), element('option', { value: 'custom', text: '自定义' })]);
@@ -247,14 +263,14 @@ function startResize(event, axes) {
   };
   handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', end); handle.addEventListener('pointercancel', end);
 }
-panel.append(conversation, status, composer, settings, latestButton, morePopover, scopePopover, effortPopover, heightHandle, widthHandle, cornerHandle);
+panel.append(conversation, status, composer, settings, exporter, latestButton, morePopover, scopePopover, effortPopover, heightHandle, widthHandle, cornerHandle);
 root.append(launcher, panel);
 document.body.append(host);
 root.addEventListener('keydown', event => {
   if (event.key === 'Escape') {
     event.preventDefault(); event.stopPropagation();
     if (state.popover) closePopover(true);
-    else if (state.view === 'settings') setView('chat');
+    else if (state.view !== 'chat') setView('chat');
     else closePanel({ instant: true });
   }
 });
@@ -371,16 +387,23 @@ function setStatus(text, error = false) {
   status.hidden = !status.textContent;
 }
 function setView(view) {
-  if (view === 'settings' && state.task) return;
-  cancelProbe(); testResult.hidden = true;
+  if (view !== 'chat' && state.task) return;
+  if (view === 'export' && !exportMessages().length) return;
+  cancelProbe(); testResult.hidden = true; clearExport();
   state.view = view;
   const chat = view === 'chat';
   closePopover();
-  conversation.hidden = !chat; composer.hidden = !chat; settings.hidden = chat;
-  moreButton.hidden = !chat; backButton.hidden = chat; panelTitle.textContent = chat ? '话题总结' : '模型设置'; panelTitle.title = chat ? state.record?.title || '' : '';
+  conversation.hidden = !chat; composer.hidden = !chat; settings.hidden = view !== 'settings'; exporter.hidden = view !== 'export';
+  moreButton.hidden = exportButton.hidden = !chat; backButton.hidden = chat;
+  panelTitle.textContent = { chat: '话题总结', settings: '模型设置', export: '导出图片' }[view]; panelTitle.title = chat ? state.record?.title || '' : '';
   updateLatest();
   setStatus('');
-  if (!chat) {
+  if (view === 'export') {
+    keyInput.value = '';
+    shot.theme ||= pageIsDark() ? 'dark' : 'light';
+    void drawExport();
+    exportThemes.find(option => option.dataset.value === shot.theme)?.focus();
+  } else if (view === 'settings') {
     providerSelect.value = savedProvider();
     endpointInput.value = state.config.endpoint || ''; keyInput.value = state.config.key || ''; modelInput.value = state.config.model || '';
     deepseekModel.value = DEEPSEEK.models.includes(state.config.model) ? state.config.model : state.config.model && savedProvider() === 'deepseek' ? 'custom' : DEEPSEEK.models[0];
@@ -392,7 +415,7 @@ function openPanel(instant = false) {
   const closing = panel.hasAttribute('data-closing');
   clearTimeout(closeTimer); panel.removeAttribute('data-closing'); panel.toggleAttribute('data-instant', instant);
   lastTrigger = document.activeElement; state.open = true; panel.hidden = false; launcher.hidden = true;
-  if (closing && state.view === 'settings') setView('chat');
+  if (closing && state.view !== 'chat') setView('chat');
   timelineButton?.setAttribute('aria-expanded', 'true'); launcher.setAttribute('aria-expanded', 'true');
   applyLayout(); refreshControls(); resizeComposer(); scrollLatest(); panel.focus();
 }
@@ -404,7 +427,7 @@ function closePanel({ instant = false } = {}) {
     clearTimeout(closeTimer); panel.removeAttribute('data-closing');
     if (state.open) return;
     panel.hidden = true;
-    if (state.view === 'settings') setView('chat');
+    if (state.view !== 'chat') setView('chat');
   };
   if (instant || panel.hidden || reduceMotion.matches) finish();
   else { panel.removeAttribute('data-instant'); panel.setAttribute('data-closing', ''); closeTimer = setTimeout(finish, 150); }
@@ -459,6 +482,7 @@ function fillHistory() {
 function refreshControls() {
   const busy = Boolean(state.task);
   panel.setAttribute('aria-busy', String(busy));
+  exportButton.disabled = busy || !exportMessages().length;
   for (const control of [scopeButton, effortButton, moreButton, refreshButton, newButton, historyButton, historySelect, settingsButton, questionInput, ...scopeOptions, ...effortOptions]) control.disabled = busy;
   updateSendButton();
   for (const parts of nodes.values()) if (parts.retry) parts.retry.disabled = busy;
@@ -544,6 +568,55 @@ function renderMessages() {
     nodes.set(message.id, parts); updateMessage(message);
   }
   updateLatest();
+}
+
+// 只导出完整的一问一答；只有一次“总结”时只保留回答，与 FluxDO 的单条导出一致。
+function exportMessages() {
+  const messages = state.session?.messages || [], pairs = [];
+  for (let i = 0; i < messages.length - 1; i++) {
+    const ask = messages[i], answer = messages[i + 1];
+    if (ask.role === 'user' && answer.role === 'assistant' && answer.status === 'complete' && answer.content.trim()) { pairs.push(ask, answer); i++; }
+  }
+  return pairs.length === 2 && pairs[0].content === SUMMARY_PROMPT ? [pairs[1]] : pairs;
+}
+function pageIsDark() {
+  const [r = 255, g = 255, b = 255] = (getComputedStyle(panel).backgroundColor.match(/[\d.]+/g) || []).map(Number);
+  return r * 0.299 + g * 0.587 + b * 0.114 < 128;
+}
+function clearExport() {
+  shot.token++; shot.blob = null; exportPreview.replaceChildren(); exportPreview.setAttribute('aria-busy', 'false');
+}
+async function drawExport() {
+  const token = ++shot.token, messages = exportMessages();
+  for (const option of exportThemes) option.setAttribute('aria-pressed', String(option.dataset.value === shot.theme));
+  copyImageButton.disabled = saveImageButton.disabled = true; shot.blob = null;
+  exportPreview.setAttribute('aria-busy', 'true');
+  try {
+    const card = shareCard({ title: state.record?.title, topicId: state.topicId, theme: shot.theme, time: shareTime(messages.at(-1)?.createdAt),
+      messages: messages.map(m => ({ role: m.role, model: m.model, content: m.role === 'user' && m.content === SUMMARY_PROMPT ? '总结这个话题' : m.content })) });
+    const { canvas, blob } = await renderShareImage(card);
+    if (token !== shot.token) return;
+    canvas.setAttribute('role', 'img'); canvas.setAttribute('aria-label', `导出图片预览（${SHARE_THEMES[shot.theme].label}）`);
+    exportPreview.replaceChildren(canvas); shot.blob = blob;
+    copyImageButton.disabled = saveImageButton.disabled = false;
+  } catch (error) {
+    if (token === shot.token) setStatus(error.message || '图片生成失败，请重试。', true);
+  } finally { if (token === shot.token) exportPreview.setAttribute('aria-busy', 'false'); }
+}
+async function copyExport() {
+  if (!shot.blob) return;
+  try {
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': shot.blob })]);
+    copyImageButton.textContent = '已复制'; setStatus('');
+    setTimeout(() => { copyImageButton.textContent = '复制图片'; }, 1400);
+  } catch { setStatus('复制失败，请改用保存图片。', true); }
+}
+function saveExport() {
+  if (!shot.blob) return;
+  const url = URL.createObjectURL(shot.blob);
+  const name = `linuxdo-${state.topicId}-${shareTime(Date.now()).replace(/[-: ]/g, '').replace(/^(\d{8})/, '$1-')}.png`;
+  element('a', { href: url, download: name }).click();
+  setTimeout(() => URL.revokeObjectURL(url), 30_000);
 }
 
 async function getJson(path, signal) {
@@ -642,6 +715,7 @@ function reconcile() {
   const id = topicIdFromUrl(location.href);
   if (id !== state.topicId) {
     state.task?.controller.abort(); cancelProbe(); testResult.hidden = true; state.task = null; state.context = null; state.topicId = id;
+    if (state.view === 'export') setView('chat');
     questionInput.value = ''; resizeComposer(); closePopover(); nodes.clear();
     if (id) {
       state.record = loadRecord(id); state.session = state.record.sessions.find(s => s.id === state.record.activeId);
