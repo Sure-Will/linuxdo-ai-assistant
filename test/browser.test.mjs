@@ -253,6 +253,31 @@ test('停止、重试、新对话和历史切换不会重复问题', async t => 
   assert.equal(await page.locator('#linuxdo-ai-root .message').count(), 2);
 });
 
+test('思考过程流式展开，正文开始后收起，可回看且不发回模型', async t => {
+  const page = await setup(t); await configure(page); await page.evaluate(() => fixture.setMode('thinking'));
+  const thinking = page.locator('#linuxdo-ai-root .assistant .thinking');
+  await summary(page).click();
+  await thinking.locator('.thinking-text').filter({ hasText: '首帖' }).waitFor();
+  assert.equal(await thinking.evaluate(node => node.open), true, '思考阶段自动展开');
+  assert.equal(await thinking.locator('summary').innerText(), '正在思考…');
+  assert.equal(await page.locator('#linuxdo-ai-root .assistant .typing').isVisible(), false, '有思考内容时不再显示等待圆点');
+  assert.equal(await page.locator('#linuxdo-ai-root .status').isVisible(), false);
+  await done(page);
+  assert.equal(await thinking.evaluate(node => node.open), false, '正文开始后自动收起');
+  assert.match(await thinking.locator('summary').innerText(), /^已思考 \d+ 秒$/);
+  await thinking.locator('summary').click();
+  assert.match(await thinking.locator('.thinking-text').innerText(), /首帖[\s\S]*已确认的事实/);
+  await page.screenshot({ path: path.join(resultsDir, 'thinking-expanded.png') });
+  await page.evaluate(() => fixture.setMode('normal'));
+  await input(page).fill('谁更谨慎？');
+  await page.getByRole('button', { name: '发送问题', exact: true }).click(); await done(page);
+  assert.ok(!JSON.stringify(await page.evaluate(() => fixture.requests.at(-1).payload.messages)).includes('首帖把版本号'), '思考过程不进入后续请求');
+  assert.equal(await thinking.count(), 2);
+  assert.equal(await thinking.nth(1).isVisible(), false, '未开启思考的回答不显示思考块');
+  await page.reload(); await page.locator('#linuxdo-ai-topic-button').click();
+  assert.match(await thinking.first().locator('summary').innerText(), /^已思考 \d+ 秒$/, '刷新后仍可回看思考过程');
+});
+
 test('论坛验证和模型网络错误不会触发自动重试', async t => {
   const page = await setup(t); await configure(page); await page.evaluate(() => fixture.setMode('forum-error'));
   await summary(page).click(); await page.getByRole('status').filter({ hasText: '重新登录或验证' }).waitFor();

@@ -178,7 +178,7 @@ function requestError(response, endpoint) {
 
 export function streamChat({ config, messages, request, signal, onDelta = () => {}, onReasoning = () => {}, onUsage = () => {}, onFinish = () => {}, idleMs = 180_000, maxTokens, includeUsage = false }) {
   return new Promise((resolve, reject) => {
-    let settled = false, handle, reader, timer, streaming = false, content = '', done = false, finish = null;
+    let settled = false, handle, reader, timer, streaming = false, content = '', reasoning = '', done = false, finish = null;
     const end = error => {
       if (settled) return;
       settled = true;
@@ -197,6 +197,12 @@ export function streamChat({ config, messages, request, signal, onDelta = () => 
       if (content.length > 160_000) throw new Error('回答超过长度限制，已保留收到的内容。');
       onDelta(text, content);
     };
+    // 思考过程只用于展示；超过上限后不再追加，不影响正文生成。
+    const think = text => {
+      if (settled || typeof text !== 'string' || !text || reasoning.length > 200_000) return;
+      reasoning += text;
+      onReasoning(text, reasoning);
+    };
     const parser = new EventStreamParser(({ event, data }) => {
       if (settled || done) return;
       if (data.trim() === '[DONE]') { done = true; return; }
@@ -207,7 +213,7 @@ export function streamChat({ config, messages, request, signal, onDelta = () => 
       const choice = json.choices?.[0];
       if (!choice) return;
       if (typeof choice.delta?.content === 'string') append(choice.delta.content);
-      if (choice.delta?.reasoning_content) onReasoning();
+      think(choice.delta?.reasoning_content ?? choice.delta?.reasoning);
       if (choice.finish_reason) { finish = choice.finish_reason; onFinish(); }
     });
     const complete = () => {
@@ -242,6 +248,7 @@ export function streamChat({ config, messages, request, signal, onDelta = () => 
         if (isJson) {
           const json = JSON.parse(body + decoder.decode());
           if (json.error) throw new Error(String(json.error.message || '模型请求失败。').slice(0, 240));
+          think(json.choices?.[0]?.message?.reasoning_content ?? json.choices?.[0]?.message?.reasoning);
           append(json.choices?.[0]?.message?.content || '');
           if (json.usage) onUsage(json.usage);
           onFinish();

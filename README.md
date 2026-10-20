@@ -42,6 +42,7 @@ https://raw.githubusercontent.com/Sure-Will/linuxdo-ai-assistant/main/dist/linux
 - 输入框下方的范围按钮可选“仅首帖、前 5 / 10 / 20 帖、全部帖子”，默认前 5 帖，计数包含首帖。
 - 范围按钮直接展开可选项，无需再打开二级选择框。旁边的思考强度提供“关闭、低、高、最高”，DeepSeek 默认高，分别使用 `none / low / high / max`，配合 `thinking.type` 开关。依据 [DeepSeek 思考模式文档](https://api-docs.deepseek.com/guides/thinking_mode/) 与 [Chat Completions 参数文档](https://api-docs.deepseek.com/api/create-chat-completion/) 于 2026-09-30 核对。通用自定义接口另有“默认”，不附加思考参数；是否支持其他档位由接口决定。
 - 回答上方显示本条消息生成时使用的模型名；之后切换模型不改变旧回答署名。
+- 模型返回思考内容（`reasoning_content` 或 `reasoning`）时，回答上方显示“思考过程”：思考阶段自动展开并流式显示，正文开始后收起为“已思考 N 秒”，点击可展开回看。思考内容随对话保存在本地，追问时不会发回模型。
 - 范围菜单内的“更新原文”仅刷新帖子上下文，不调用模型。实际篇数收在同一菜单里。
 - 追问会携带当前范围的原文和完整问答历史。停止或失败的半条回答仍保留在界面，但不作为完整答案送进下一轮。
 - `Enter` 发送，`Shift + Enter` 换行；中文输入法选词时回车不发送，仍兼容 `⌘ + Enter` 和 `Ctrl + Enter`。`Esc` 返回对话或关闭面板。

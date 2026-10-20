@@ -84,6 +84,16 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 12px; }
 td, th { border: 1px solid var(--ai-line); padding: 6px 8px; text-align: left; }
 th { background: var(--ai-soft); }
+/* 思考过程默认弱化显示，思考阶段限制高度并在框内跟随最新内容。 */
+.thinking { margin-bottom: 8px; }
+.thinking summary { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; border-radius: 6px; font-size: 12px; color: var(--ai-muted); cursor: pointer; list-style: none; user-select: none; }
+.thinking summary::-webkit-details-marker { display: none; }
+.thinking summary:focus-visible { outline: 2px solid var(--ai-accent); outline-offset: 2px; }
+@media (hover: hover) { .thinking summary:hover { color: var(--ai-text); } }
+.thinking summary .ui-icon { width: 13px; height: 13px; rotate: -90deg; }
+.thinking[open] summary .ui-icon { rotate: 0deg; }
+.thinking-text { margin: 4px 0 6px; padding-left: 12px; border-left: 2px solid var(--ai-line); font-size: 12px; line-height: 1.75; color: var(--ai-muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+.message[data-thinking] .thinking-text { max-height: 220px; overflow-y: auto; }
 .message-note { font-size: 12px; margin-top: 8px; color: var(--ai-muted); overflow-wrap: anywhere; }
 .message-note:empty { display: none; }
 .message[data-status="error"] .message-note { color: var(--danger, #c74949); }
@@ -104,7 +114,7 @@ textarea:focus-visible { outline: none; }
 .send-slot > .send-button { grid-area: 1 / 1; width: 40px; padding: 8px; background: transparent; }
 .send-button:disabled { opacity: 1; color: var(--ai-muted); background: color-mix(in srgb, var(--ai-text) 8%, var(--ai-bg)); }
 .typing { display: none; align-items: center; gap: 5px; height: 26px; }
-.message[data-status="generating"]:has(.body:empty) .typing { display: flex; }
+.message[data-status="generating"]:has(.body:empty):has(.thinking[hidden]) .typing { display: flex; }
 .typing i { width: 5px; height: 5px; border-radius: 50%; background: var(--ai-muted); opacity: .35; }
 .latest { position: absolute; left: 50%; translate: -50% 0; bottom: calc(var(--ai-composer-height, 114px) + 10px); display: grid; place-items: center; width: 32px; height: 32px; min-height: 32px; padding: 0; border: 1px solid var(--ai-line); border-radius: 50%; color: var(--ai-muted); background: var(--ai-bg); box-shadow: 0 2px 8px #0002; }
 .latest .ui-icon { width: 16px; height: 16px; }
@@ -168,6 +178,8 @@ select { padding: 8px 10px; min-height: 40px; background: var(--ai-bg); border: 
   .message.assistant.enter { animation-delay: .05s; }
   .swap-in { animation: ai-swap .18s var(--ai-ease); }
   .typing i { animation: ai-dot 1.2s ease-in-out infinite; }
+  .thinking summary .ui-icon { transition: rotate .15s var(--ai-ease); }
+  .message[data-thinking] .thinking summary span { animation: ai-breathe 1.6s ease-in-out infinite; }
   .typing i:nth-child(2) { animation-delay: .15s; }
   .typing i:nth-child(3) { animation-delay: .3s; }
 }
@@ -180,6 +192,7 @@ select { padding: 8px 10px; min-height: 40px; background: var(--ai-bg); border: 
 @keyframes ai-rise { from { opacity: 0; transform: translateY(6px); } }
 @keyframes ai-swap { from { opacity: 0; scale: .25; filter: blur(4px); } }
 @keyframes ai-dot { 0%, 80%, 100% { opacity: .35; } 40% { opacity: 1; } }
+@keyframes ai-breathe { 50% { opacity: .45; } }
 @media (max-width: 620px) {
   .resize { display: none; }
   .panel { inset: 0; height: auto; width: 100%; max-width: none; border-radius: 0; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }

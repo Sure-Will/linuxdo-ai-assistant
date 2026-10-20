@@ -4,6 +4,7 @@
   const storeKey = isPreview ? 'linuxdo-ai-preview:' : 'linuxdo-ai-fixture:';
   const previewTitle = 'pi 新版本号发生跳跃，似乎是 1.0 的前兆。';
   const previewAnswer = '## 讨论要点\n\n帖子围绕 **pi 版本号的变化** 展开：新版本号出现跳跃，有人据此推测项目正在为 1.0 做准备。\n\n- 发帖者将版本号变化视为可能的发布信号。\n- 回复主要讨论新架构、旧分支，以及升级后的兼容性。\n- 目前的材料以猜测和期待为主，还不足以确定发布时间。\n\n## 可以确认什么\n\n版本号发生了变化，但 **版本号变化与正式发布是两件事**。判断是否进入 1.0，还需要结合项目的发布说明与维护者公告。\n\n> 先看变更日志，再决定是否升级日常环境。\n\n### 如果准备升级\n\n1. 保留现有配置与会话记录。\n2. 在独立环境验证常用功能。\n3. 核对插件与模型配置是否兼容。\n\n这是一段用于检视排版与交互的模拟回答。';
+  const reasoningText = '用户想了解回复里大家的看法。先按楼层梳理：首帖把版本号跳跃当作 1.0 的信号；\n第 2 楼更关心配置、插件和会话能否迁移；\n第 3 楼认为应以维护者的变更记录为准。\n这些都是推测和关切，需要和已确认的事实分开说明。';
   const calls = [], requests = [];
   let mode = 'normal';
   window.GM_getValue = (key, fallback) => { const value = localStorage.getItem(storeKey + key); return value === null ? fallback : JSON.parse(value); };
@@ -15,7 +16,7 @@
     const time = Date.now();
     const messages = ['conversation', 'error'].includes(scene) ? [
       { id: 'preview-question', role: 'user', content: '请简要总结这个话题的主要内容和讨论要点。', status: 'complete', createdAt: time },
-      { id: 'preview-answer', role: 'assistant', content: scene === 'error' ? '' : previewAnswer, status: scene === 'error' ? 'error' : 'complete', model: 'deepseek-flash', createdAt: time, ...(scene === 'error' ? { error: '模型暂时无法连接，请稍后重试。' } : {}) },
+      { id: 'preview-answer', role: 'assistant', content: scene === 'error' ? '' : previewAnswer, status: scene === 'error' ? 'error' : 'complete', model: 'deepseek-flash', createdAt: time, ...(scene === 'error' ? {} : { reasoning: reasoningText, reasoningMs: 6400 }), ...(scene === 'error' ? { error: '模型暂时无法连接，请稍后重试。' } : {}) },
     ] : [];
     GM_setValue('linuxdo-ai:v1:config', { endpoint: 'https://api.deepseek.com/chat/completions', key: 'preview-only-no-network', model: 'deepseek-flash' });
     GM_setValue('linuxdo-ai:v1:topic:1001', { version: 1, title: previewTitle, activeId: 'preview-current', sessions: [
@@ -55,10 +56,14 @@
       if (currentMode === 'api-error') { options.onerror(); return; }
       options.onloadstart({ status: 200, response, responseHeaders: 'content-type: text/event-stream' });
       const text = request.payload.max_tokens === 512 ? Array.from({ length: 50 }, (_, i) => i + 1).join(' ') : currentMode === 'xss' ? '# 安全测试\n<script>window.fixtureXss=1</script>\n\n[点击](javascript:alert(1))\n\n![图片](https://example.com/tracker.png)\n\n<img src=x onerror="window.fixtureXss=2">\n\n**正常文字**' : currentMode === 'long' ? Array(15).fill(answer).join('\n\n') : isPreview ? previewAnswer : answer;
-      const pieces = text.match(/[\s\S]{1,13}/gu) || []; let index = 0;
+      // 开启思考时先发 reasoning_content，再发正文。
+      const thinking = request.payload.thinking?.type === 'enabled' || currentMode === 'thinking';
+      const pieces = [...(thinking ? (reasoningText.match(/[\s\S]{1,8}/gu) || []).map(reasoning_content => ({ reasoning_content })) : []),
+        ...(text.match(/[\s\S]{1,13}/gu) || []).map(content => ({ content }))];
+      let index = 0;
       const tick = () => {
         if (request.aborted) return;
-        if (index < pieces.length) { send({ choices: [{ delta: { content: pieces[index++] } }] }); timer = setTimeout(tick, currentMode === 'preview-slow' ? 260 : currentMode === 'slow' ? 100 : 8); }
+        if (index < pieces.length) { send({ choices: [{ delta: pieces[index++] }] }); timer = setTimeout(tick, currentMode === 'preview-slow' ? 260 : currentMode === 'slow' ? 100 : currentMode === 'thinking' ? 40 : 8); }
         else { send({ choices: [{ delta: {}, finish_reason: 'stop' }], ...(request.payload.stream_options?.include_usage ? { usage: { completion_tokens: 99 } } : {}) }); controller.enqueue(enc.encode('data: [DONE]\n\n')); }
       };
       tick();

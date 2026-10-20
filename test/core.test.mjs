@@ -77,10 +77,10 @@ function mockRequest(text, { status = 200, type = 'text/event-stream', delay = 0
 }
 const event = value => `data: ${JSON.stringify(value)}\r\n\r\n`;
 test('中文 UTF-8 按单字节拆分后流式正文仍完整', async () => {
-  const text = event({ choices: [{ delta: { reasoning_content: '思考' } }] }) + event({ choices: [{ delta: { content: '中文🙂总结' } }] }) + event({ choices: [{ delta: {}, finish_reason: 'stop' }] }) + 'data: [DONE]\r\n\r\n';
-  let reasoning = false, output = '';
-  const result = await streamChat({ config, messages: [], ...mockRequest(text), onReasoning: () => { reasoning = true; }, onDelta: delta => { output += delta; } });
-  assert.equal(result, '中文🙂总结'); assert.equal(output, result); assert.equal(reasoning, true);
+  const text = event({ choices: [{ delta: { reasoning_content: '先看' } }] }) + event({ choices: [{ delta: { reasoning: '楼层' } }] }) + event({ choices: [{ delta: { content: '中文🙂总结' } }] }) + event({ choices: [{ delta: {}, finish_reason: 'stop' }] }) + 'data: [DONE]\r\n\r\n';
+  let reasoning = '', output = '';
+  const result = await streamChat({ config, messages: [], ...mockRequest(text), onReasoning: (_delta, all) => { reasoning = all; }, onDelta: delta => { output += delta; } });
+  assert.equal(result, '中文🙂总结'); assert.equal(output, result); assert.equal(reasoning, '先看楼层', '思考文本逐段累积，兼容 reasoning 字段');
 });
 test('服务端提前断流不会伪装成完整答案', async () => {
   await assert.rejects(streamChat({ config, messages: [], ...mockRequest(event({ choices: [{ delta: { content: '半段' } }] })) }), /连接提前结束/);
@@ -89,8 +89,10 @@ test('HTTP 401 与额度错误给出可行动提示', async () => {
   await assert.rejects(streamChat({ config, messages: [], ...mockRequest('{"error":{"message":"bad key"}}', { status: 401, type: 'application/json' }) }), /API Key 无效/);
 });
 test('支持服务商忽略 stream 后返回普通 JSON', async () => {
-  const data = JSON.stringify({ choices: [{ message: { content: '普通回复' }, finish_reason: 'stop' }] });
-  assert.equal(await streamChat({ config, messages: [], ...mockRequest(data, { type: 'application/json' }) }), '普通回复');
+  const data = JSON.stringify({ choices: [{ message: { content: '普通回复', reasoning_content: '一次性思考' }, finish_reason: 'stop' }] });
+  let reasoning = '';
+  assert.equal(await streamChat({ config, messages: [], ...mockRequest(data, { type: 'application/json' }), onReasoning: (_delta, all) => { reasoning = all; } }), '普通回复');
+  assert.equal(reasoning, '一次性思考');
 });
 test('输出上限与内容拦截不标记成功', async () => {
   const text = event({ choices: [{ delta: { content: '部分内容' }, finish_reason: 'length' }] }) + 'data: [DONE]\n\n';

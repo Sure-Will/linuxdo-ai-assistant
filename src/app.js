@@ -443,7 +443,7 @@ function renderSoon(message, delay = 80) {
   if (pendingRenders.has(message.id)) return;
   const flush = () => {
     const parts = nodes.get(message.id);
-    if (parts && selectingIn(parts.body)) { pendingRenders.set(message.id, setTimeout(flush, 250)); return; }
+    if (parts && selectingIn(parts.article)) { pendingRenders.set(message.id, setTimeout(flush, 250)); return; }
     pendingRenders.delete(message.id); updateMessage(message);
   };
   pendingRenders.set(message.id, setTimeout(flush, delay));
@@ -482,6 +482,21 @@ function updateMessage(message) {
   if (message.role === 'user') parts.body.textContent = message.content === SUMMARY_PROMPT ? '总结这个话题' : message.content;
   else parts.body.replaceChildren(message.content ? renderMarkdown(message.content) : document.createTextNode(''));
   parts.note.textContent = message.error || (message.status === 'stopped' ? '已停止' : '');
+  if (parts.thinking) {
+    const reasoning = String(message.reasoning || '').trim();
+    const thinking = message.status === 'generating' && !message.content;
+    parts.thinking.hidden = !reasoning;
+    parts.article.toggleAttribute('data-thinking', thinking && Boolean(reasoning));
+    parts.thinkingLabel.textContent = thinking ? '正在思考…' : message.reasoningMs ? `已思考 ${Math.max(1, Math.round(message.reasoningMs / 1000))} 秒` : '思考过程';
+    // 思考时展开，正文开始后收起；用户手动展开或收起后不再自动切换。
+    if (!parts.touched) parts.thinking.open = thinking;
+    const text = parts.thinkingText;
+    if (text.textContent !== reasoning) {
+      const stick = text.scrollHeight - text.scrollTop - text.clientHeight < 24;
+      text.textContent = reasoning;
+      if (stick) text.scrollTop = text.scrollHeight;
+    }
+  }
   if (parts.copy) {
     parts.copy.disabled = !message.content;
     parts.retry.hidden = message.status === 'generating' || state.session?.messages.at(-1)?.id !== message.id;
@@ -514,13 +529,19 @@ function renderMessages() {
       if (index === state.session.messages.length - 1 && user?.role === 'user') void send(user.content, true);
     }, { hidden: true });
     const name = message.model || '未知模型';
+    const thinkingLabel = element('span');
+    const thinkingText = element('div', { class: 'thinking-text' });
+    const thinking = element('details', { class: 'thinking', hidden: true }, [
+      element('summary', { onClick: () => { parts.touched = true; } }, [thinkingLabel, uiIcon('down')]), thinkingText,
+    ]);
     const article = element('article', { class: 'message assistant', 'data-message-id': message.id }, [
-      element('div', { class: 'message-head' }, [element('span', { text: name, title: message.model || '' })]),
+      element('div', { class: 'message-head' }, [element('span', { text: name, title: message.model || '' })]), thinking,
       element('div', { class: 'typing', 'aria-hidden': 'true' }, [element('i'), element('i'), element('i')]), body, note,
       element('div', { class: 'actions message-actions' }, [copy, retry]),
     ]);
+    const parts = { article, body, note, copy, retry, thinking, thinkingLabel, thinkingText, touched: false };
     conversation.append(article);
-    nodes.set(message.id, { article, body, note, copy, retry }); updateMessage(message);
+    nodes.set(message.id, parts); updateMessage(message);
   }
   updateLatest();
 }
@@ -562,7 +583,8 @@ async function send(rawQuestion, replaceLast = false) {
   const task = { topicId: state.topicId, record: state.record, session: state.session, controller: new AbortController(), lastSave: 0 };
   state.task = task; refreshControls();
   const current = () => state.task === task && state.topicId === task.topicId && topicIdFromUrl(location.href) === task.topicId;
-  let answer;
+  let answer, thinkStart = 0;
+  const saveSoon = () => { if (Date.now() - task.lastSave > 1200) { task.lastSave = Date.now(); persist(task.record, task.topicId); } };
   try {
     setStatus('正在读取帖子…');
     let context = state.context;
@@ -586,12 +608,17 @@ async function send(rawQuestion, replaceLast = false) {
     await streamChat({ config, messages, request: options => GM_xmlhttpRequest(options), signal: task.controller.signal,
       onDelta: (_delta, content) => {
         if (!current()) { task.controller.abort(); return; }
-        if (!answer.content) setStatus('');
+        if (!answer.content) { setStatus(''); if (thinkStart) answer.reasoningMs = Date.now() - thinkStart; }
         answer.content = content;
-        renderSoon(answer);
-        if (Date.now() - task.lastSave > 1200) { task.lastSave = Date.now(); persist(task.record, task.topicId); }
+        renderSoon(answer); saveSoon();
       },
-      onReasoning: () => { if (current() && !answer.content) setStatus('模型正在思考…'); },
+      // 思考过程只保存在本地用于回看，后续追问不会发回模型。
+      onReasoning: (_delta, reasoning) => {
+        if (!current()) { task.controller.abort(); return; }
+        if (!answer.reasoning) { setStatus(''); thinkStart = Date.now(); }
+        answer.reasoning = reasoning;
+        renderSoon(answer); saveSoon();
+      },
     });
     checkAbort(task.controller.signal); answer.status = 'complete';
     if (current()) setStatus('');
@@ -602,6 +629,7 @@ async function send(rawQuestion, replaceLast = false) {
     if (current()) setStatus(answer ? '' : message, !stopped && !answer);
   } finally {
     if (answer?.status === 'generating') answer.status = 'stopped';
+    if (thinkStart && !answer.reasoningMs) answer.reasoningMs = Date.now() - thinkStart;
     persist(task.record, task.topicId);
     if (state.task === task) {
       state.task = null; refreshControls();
