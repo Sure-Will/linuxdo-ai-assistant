@@ -28,8 +28,38 @@
   }
   const json = value => new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json' } });
   const post = (id, topic) => ({ id, post_number: id, username: `测试_${id}`, cooked: `<p>话题 ${topic} 的测试楼层 ${id}。</p><pre><code>const floor = ${id};</code></pre>` });
+  // 生成本地测试图片：截图、emoji 与头像，不访问外部网络。
+  const imageBlob = (width, height, color, label) => new Promise(resolve => {
+    const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
+    const context = canvas.getContext('2d'); context.fillStyle = color; context.fillRect(0, 0, width, height);
+    context.fillStyle = '#ffffff'; context.font = `${Math.round(height / 5)}px sans-serif`; context.fillText(label, width * 0.08, height * 0.6);
+    canvas.toBlob(resolve, 'image/png');
+  });
+  const imageFor = url => /emoji/.test(url) ? imageBlob(72, 72, '#f5b400', '☺') : /avatar/.test(url) ? imageBlob(96, 96, '#4a7bd0', '测') : imageBlob(800, 450, '#2f6f5e', '测试截图 14K tps');
+  const imageRequests = [];
+  const postCooked = topic => `<p>楼主的推理框架数据很详细 <img src="/fixture-image/emoji/smile.png" class="emoji" alt=":smile:" title=":smile:"> 值得一看。</p>
+<aside class="quote no-group" data-username="测试楼主" data-post="1" data-topic="${topic}"><div class="title"><div class="quote-controls"></div><img class="avatar" src="/fixture-image/avatar/20.png"> 测试楼主:</div><blockquote><p>每卡吞吐 14K tps。</p></blockquote></aside>
+<div class="lightbox-wrapper"><a class="lightbox" href="https://cdn.example.test/original/table.png"><img src="https://cdn.example.test/optimized/table.png" width="690" height="388"><div class="meta"><span class="filename">table.png</span><span class="informations">800×450 120 KB</span></div></a></div>
+<p><img src="https://cdn.example.test/broken.png" width="100" height="100"></p>
+<aside class="onebox allowlistedgeneric" data-onebox-src="https://github.com/deepseek-ai/example"><header class="source"><a href="https://github.com/deepseek-ai/example">github.com</a></header><article class="onebox-body"><h3><a href="https://github.com/deepseek-ai/example">deepseek-ai/example</a></h3><p>推理框架示例仓库</p></article></aside>
+<pre><code class="lang-js"><span class="hljs-keyword">const</span> tps = 14000;</code></pre>
+<table><thead><tr><th>指标</th><th>数值</th></tr></thead><tbody><tr><td>吐字速度</td><td>230 tps</td></tr></tbody></table>
+<p><span class="spoiler">隐藏内容</span> <a class="mention" href="/u/test">@test</a></p>
+<script>window.fixturePostXss = 1</script><img src="javascript:window.fixturePostXss=3" onerror="window.fixturePostXss = 2"><iframe src="https://example.com"></iframe>`;
   const nativeFetch = window.fetch.bind(window);
   window.fetch = async (path, options) => {
+    const href = typeof path === 'string' ? path : path instanceof URL ? path.href : '';
+    if (href.includes('/fixture-image/')) { imageRequests.push(href); return new Response(await imageFor(href), { headers: { 'Content-Type': 'image/png' } }); }
+    if (href.startsWith('https://cdn.example.test/')) { imageRequests.push(href); throw new TypeError('Failed to fetch'); }
+    if (typeof path === 'string' && path.startsWith('/posts/')) {
+      calls.push(path);
+      if (mode === 'forum-error') return new Response('<html>verification</html>', { status: 403 });
+      const id = Number(path.match(/\/posts\/(\d+)\.json/)?.[1]);
+      const topic = location.pathname.split('/')[3] || '1001';
+      return json({ id, post_number: id > 100 ? id - 96 : id, topic_id: Number(topic), topic_slug: 'topic', topic_title: isPreview ? previewTitle : '长帖阅读验收：47 篇帖子，分批补齐',
+        username: `测试_${id}`, name: id === 1 ? '测试楼主' : '测试回复者', avatar_template: '/fixture-image/avatar/{size}.png', created_at: '2026-10-20T07:30:00.000Z',
+        cooked: id === 2 ? postCooked(topic) : post(id, topic).cooked });
+    }
     if (typeof path !== 'string' || !path.startsWith('/t/')) return nativeFetch(path, options);
     if (options.signal?.aborted) throw new DOMException('stopped', 'AbortError');
     calls.push(path);
@@ -45,6 +75,14 @@
   };
   const answer = '## 主要内容\n\n这段讨论关注 **长帖的完整读取** 与连续追问。默认只读前 5 帖，选择“全部帖子”后应补齐其余楼层。\n\n- 按所选范围获取帖子，避免漏掉尚未渲染的回复。\n- 话题切换时取消旧请求，保持对话独立。\n- 设置与对话保存在本地。\n\n| 检查项 | 预期 |\n| --- | --- |\n| 分批读取 | 47/47 帖 |\n| 继续追问 | 带入完整历史 |\n\n```js\nconst context = await loadTopic();\n```\n\n可以回看 [第 21 楼](https://linux.do/t/1001/21)。\n';
   window.GM_xmlhttpRequest = options => {
+    if (options.method === 'GET') {
+      imageRequests.push(options.url);
+      const timer = setTimeout(async () => {
+        if (/broken/.test(options.url)) options.onload({ status: 404, response: null, responseHeaders: '' });
+        else options.onload({ status: 200, response: await imageFor(options.url), responseHeaders: 'content-type: image/png' });
+      }, 10);
+      return { abort() { clearTimeout(timer); options.onabort?.(); } };
+    }
     const request = { url: options.url, payload: JSON.parse(options.data), aborted: false }; requests.push(request);
     let controller, timer;
     const currentMode = mode;
@@ -79,5 +117,25 @@
   document.getElementById('go-first').onclick = () => navigate('1001');
   document.getElementById('go-second').onclick = () => navigate('1002');
   document.getElementById('theme-toggle').onclick = () => document.documentElement.classList.toggle('dark');
-  window.fixture = { calls, requests, setMode(value) { mode = value; }, storeKey };
+  // 模拟 Discourse 帖子操作栏：收起时只渲染常用按钮，点“…”后才渲染隐藏按钮。
+  let menuClicks = 0;
+  const postMenu = () => {
+    const nav = document.createElement('nav'); nav.className = 'post-controls collapsed';
+    const actions = document.createElement('div'); actions.className = 'actions';
+    const button = (name, text) => { const node = document.createElement('button'); node.className = `post-action-menu__${name}`; node.textContent = text; return node; };
+    const more = button('show-more', '…'); more.classList.add('show-more-actions');
+    more.addEventListener('click', () => { menuClicks++; nav.className = 'post-controls expanded'; more.replaceWith(button('bookmark', '书签'), button('flag', '举报')); });
+    actions.append(button('like', '赞'), button('copy-link', '链接'), more, button('reply', '回复')); nav.append(actions);
+    return nav;
+  };
+  document.querySelectorAll('main article').forEach((article, index) => { article.dataset.postId = String(index + 1); article.append(postMenu()); });
+  let added = 100;
+  function addPost() { const article = document.createElement('article'); article.dataset.postId = String(++added); article.append(postMenu()); document.querySelector('main').append(article); }
+  // 模拟 Glimmer 重绘：整组按钮被替换，脚本插入的按钮随之消失。
+  function rerenderMenu(index) {
+    const actions = document.querySelectorAll('main nav.post-controls .actions')[index];
+    const button = (name, text) => { const node = document.createElement('button'); node.className = `post-action-menu__${name}`; node.textContent = text; return node; };
+    actions.replaceChildren(button('like', '赞'), button('copy-link', '链接'), button('bookmark', '书签'), button('reply', '回复'));
+  }
+  window.fixture = { calls, requests, imageRequests, setMode(value) { mode = value; }, storeKey, addPost, rerenderMenu, get menuClicks() { return menuClicks; } };
 })();

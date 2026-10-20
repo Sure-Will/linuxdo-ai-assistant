@@ -23,7 +23,7 @@ const shareStyles = `
 .share-body { padding: 12px; border-radius: 8px; background: var(--card); overflow-wrap: anywhere; }
 .share-body.plain { white-space: pre-wrap; }
 .share-body > :first-child { margin-top: 0; }
-.share-body > :last-child { margin-bottom: 0; }
+.share-body > :last-child, .share-body :is(blockquote, li, td, th, .share-quote, .share-details) > :last-child { margin-bottom: 0; }
 .share-body p { margin: 0 0 10px; }
 .share-body h2, .share-body h3, .share-body h4 { margin: 16px 0 8px; font-size: 15px; line-height: 1.5; font-weight: 650; color: ${mix(92)}; }
 .share-body ul, .share-body ol { margin: 8px 0 12px; padding-left: 22px; }
@@ -39,6 +39,25 @@ const shareStyles = `
 .share-body table { width: 100%; margin: 10px 0; border-collapse: collapse; font-size: 12px; }
 .share-body th, .share-body td { padding: 5px 6px; border: 1px solid ${mix(14)}; text-align: left; background: transparent; }
 .share-body th { background: ${mix(5)}; }
+.share-author { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.share-avatar { flex: none; width: 36px; height: 36px; border-radius: 50%; box-shadow: 0 0 0 1px ${mix(10)}; }
+.share-avatar.fallback { display: grid; place-items: center; background: ${mix(12)}; color: ${mix(70)}; font-size: 15px; font-weight: 600; }
+.share-author-text { min-width: 0; line-height: 1.45; }
+.share-name { font-size: 14px; font-weight: 500; color: ${mix(85)}; overflow-wrap: anywhere; }
+.share-handle { font-size: 12px; color: ${mix(60)}; overflow-wrap: anywhere; }
+.share-post { padding: 12px 0 16px; }
+.share-body .share-image { display: block; max-width: 100%; height: auto; margin: 8px 0; border-radius: 6px; }
+.share-body .share-emoji { display: inline; width: 1.25em; height: 1.25em; margin: 0 1px; vertical-align: -0.25em; }
+.share-body .share-missing { display: block; margin: 8px 0; padding: 10px; border-radius: 6px; background: ${mix(6)}; color: ${mix(50)}; font-size: 12px; text-align: center; }
+.share-body .share-quote { margin: 10px 0; padding: 8px 10px; border-left: 2px solid ${mix(20)}; border-radius: 0 6px 6px 0; background: ${mix(4)}; }
+.share-body .share-quote-title { margin-bottom: 4px; font-size: 12px; color: ${mix(60)}; }
+.share-body .share-quote blockquote { margin: 0; padding: 0; border: 0; color: inherit; }
+.share-body .share-onebox { margin: 10px 0; padding: 8px 10px; border: 1px solid ${mix(12)}; border-radius: 6px; }
+.share-body .share-onebox-title { font-weight: 600; color: ${mix(90)}; }
+.share-body .share-onebox-text { font-size: 12px; color: ${mix(65)}; }
+.share-body .share-onebox-host { font-size: 11px; color: ${mix(50)}; }
+.share-body .share-placeholder, .share-body .share-spoiler { padding: 0 4px; border-radius: 4px; background: ${mix(10)}; color: ${mix(55)}; font-size: 12px; }
+.share-body .share-details-summary { font-weight: 600; }
 .share-foot { padding-top: 12px; font-size: 11px; color: ${mix(60)}; }
 .share-foot-row { display: flex; align-items: center; gap: 4px; }
 .share-foot-row + .share-foot-row { margin-top: 6px; }
@@ -71,9 +90,20 @@ export function shareTime(value) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+function frame({ theme, title, badge, middle, foot }) {
+  const colors = SHARE_THEMES[theme] || SHARE_THEMES.light;
+  return element('div', { class: 'share-card', style: `--bg: ${colors.bg}; --card: ${colors.card}; --fg: ${colors.fg}; --accent: ${colors.accent};` }, [
+    element('style', { text: shareStyles }),
+    element('div', { class: 'share-head' }, [logo(), element('span', { class: 'share-brand', text: 'LINUX DO' }), ...(badge ? [badge] : [])]),
+    element('div', { class: 'share-title', text: clean(title) || '当前话题' }),
+    ...middle,
+    element('div', { class: 'share-rule' }),
+    element('div', { class: 'share-foot' }, foot),
+  ]);
+}
+
 // messages: [{ role, content, model }]；多条时像 FluxDO 一样标注“提问 / AI 回复”。
 export function shareCard({ title, topicId, messages, theme, time }) {
-  const colors = SHARE_THEMES[theme] || SHARE_THEMES.light;
   const labeled = messages.length > 1;
   const items = messages.map(message => {
     const user = message.role === 'user';
@@ -83,19 +113,137 @@ export function shareCard({ title, topicId, messages, theme, time }) {
       element('span', { text: user ? '提问' : `AI 回复${message.model ? ` · ${message.model}` : ''}` })]) : null;
     return element('div', { class: 'share-message' }, role ? [role, body] : [body]);
   });
-  return element('div', { class: 'share-card', style: `--bg: ${colors.bg}; --card: ${colors.card}; --fg: ${colors.fg}; --accent: ${colors.accent};` }, [
-    element('style', { text: shareStyles }),
-    element('div', { class: 'share-head' }, [logo(), element('span', { class: 'share-brand', text: 'LINUX DO' }),
-      element('span', { class: 'share-badge' }, [aiIcon(), element('span', { text: 'AI 助手' })])]),
-    element('div', { class: 'share-title', text: clean(title) || '当前话题' }),
-    element('div', { class: 'share-rule' }),
-    element('div', { class: 'share-messages' }, items),
-    element('div', { class: 'share-rule' }),
-    element('div', { class: 'share-foot' }, [
+  return frame({ theme, title, badge: element('span', { class: 'share-badge' }, [aiIcon(), element('span', { text: 'AI 助手' })]),
+    middle: [element('div', { class: 'share-rule' }), element('div', { class: 'share-messages' }, items)],
+    foot: [
       element('div', { class: 'share-foot-row' }, [aiIcon(), element('span', { text: '由 Linux.do AI 阅读助手生成' }), element('span', { class: 'share-time', text: time })]),
       element('div', { class: 'share-foot-row' }, [uiIcon('link'), element('span', { class: 'share-link', text: `https://linux.do/t/${topicId}` })]),
-    ]),
-  ]);
+    ] });
+}
+
+// 帖子正文来自 Discourse 服务端渲染的 cooked HTML：在惰性模板中解析，只按白名单重建节点，不复制任何属性。
+const POST_TAGS = { P: 'p', BR: 'br', HR: 'hr', STRONG: 'strong', B: 'strong', EM: 'em', I: 'em', DEL: 'del', S: 'del', INS: 'u', U: 'u', SUP: 'sup', SUB: 'sub', MARK: 'mark',
+  BLOCKQUOTE: 'blockquote', UL: 'ul', OL: 'ol', LI: 'li', TABLE: 'table', THEAD: 'thead', TBODY: 'tbody', TR: 'tr', TH: 'th', TD: 'td',
+  H1: 'h2', H2: 'h2', H3: 'h3', H4: 'h4', H5: 'h4', H6: 'h4' };
+const PLACEHOLDERS = { VIDEO: '[视频]', AUDIO: '[音频]', IFRAME: '[嵌入内容]' };
+const DROPPED = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'OBJECT', 'EMBED', 'FORM', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'CANVAS', 'svg']);
+const MAX_POST_IMAGES = 12;
+const placeholder = text => element('span', { class: 'share-placeholder', text });
+function postNodes(node, images) {
+  const fragment = document.createDocumentFragment();
+  for (const child of node.childNodes) {
+    if (child.nodeType === Node.TEXT_NODE) { fragment.append(document.createTextNode(clean(child.textContent))); continue; }
+    if (child.nodeType !== Node.ELEMENT_NODE) continue;
+    const tag = child.tagName, has = name => child.classList.contains(name);
+    if (DROPPED.has(tag) || has('meta') || has('anchor') || has('quote-controls')) continue;
+    if (PLACEHOLDERS[tag]) fragment.append(placeholder(PLACEHOLDERS[tag]));
+    else if (has('video-placeholder-container') || has('lazy-video-container')) fragment.append(placeholder('[视频]'));
+    else if (has('poll')) fragment.append(placeholder('[投票]'));
+    else if (has('spoiler') || has('spoiled')) fragment.append(element('span', { class: 'share-spoiler', text: '（剧透内容）' }));
+    else if (tag === 'IMG') {
+      const url = child.getAttribute('src') || '', emoji = has('emoji');
+      if (has('avatar') || has('site-icon') || !url) continue;
+      const kind = emoji ? 'emoji' : 'image';
+      if (kind === 'image' && images.filter(item => item.kind === 'image').length >= MAX_POST_IMAGES) { fragment.append(placeholder('[图片]')); continue; }
+      const image = element('img', { class: emoji ? 'share-emoji' : 'share-image', alt: '' });
+      images.push({ node: image, url, kind, alt: clean(child.getAttribute('alt') || child.getAttribute('title') || '') });
+      fragment.append(image);
+    } else if (tag === 'ASIDE' && has('quote')) {
+      const title = child.dataset.username ? `${child.dataset.username}:` : clean(child.querySelector('.title')?.textContent.trim());
+      const quote = child.querySelector('blockquote');
+      fragment.append(element('div', { class: 'share-quote' }, [element('div', { class: 'share-quote-title', text: title || '引用' }), element('blockquote', {}, [quote ? postNodes(quote, images) : ''])]));
+    } else if (has('onebox') && !has('inline-onebox')) {
+      const heading = child.querySelector('h3, h4')?.textContent.trim() || child.querySelector('header a, a')?.textContent.trim() || '';
+      let host = '';
+      try { host = new URL(child.dataset.oneboxSrc || child.querySelector('a[href]')?.getAttribute('href') || '', 'https://linux.do').hostname; } catch { /* 无链接时只显示标题。 */ }
+      const text = clean(child.querySelector('p')?.textContent.trim() || '');
+      fragment.append(element('div', { class: 'share-onebox' }, [element('div', { class: 'share-onebox-title', text: clean(heading) || host || '链接' }),
+        ...(text ? [element('div', { class: 'share-onebox-text', text: text.length > 120 ? `${text.slice(0, 120)}…` : text })] : []),
+        ...(host ? [element('div', { class: 'share-onebox-host', text: host })] : [])]));
+    } else if (tag === 'PRE') fragment.append(element('pre', {}, [element('code', { text: clean(child.textContent) })]));
+    else if (tag === 'CODE' || tag === 'KBD') fragment.append(element('code', { text: clean(child.textContent) }));
+    else if (tag === 'A') fragment.append(element('a', {}, [postNodes(child, images)]));
+    else if (tag === 'DETAILS') {
+      const summary = child.querySelector(':scope > summary');
+      const rest = document.createDocumentFragment();
+      for (const part of child.childNodes) if (part !== summary) rest.append(part.cloneNode(true));
+      fragment.append(element('div', { class: 'share-details' }, [element('p', { class: 'share-details-summary', text: clean(summary?.textContent.trim() || '详情') }), postNodes(rest, images)]));
+    } else if (POST_TAGS[tag]) fragment.append(element(POST_TAGS[tag], {}, [postNodes(child, images)]));
+    else fragment.append(postNodes(child, images));
+  }
+  return fragment;
+}
+
+// 图片按卡片宽度的 2 倍缩放后转成 data URL；PNG、GIF、WebP 保留透明，其余用 JPEG 控制体积。
+async function inlineImage(blob, maxWidth) {
+  const bitmap = await createImageBitmap(blob);
+  try {
+    const scale = Math.min(1, maxWidth / bitmap.width);
+    const width = Math.max(1, Math.round(bitmap.width * scale)), height = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
+    canvas.getContext('2d').drawImage(bitmap, 0, 0, width, height);
+    const alpha = /png|gif|webp/i.test(blob.type);
+    return { src: canvas.toDataURL(alpha ? 'image/png' : 'image/jpeg', 0.88), width, height };
+  } finally { bitmap.close(); }
+}
+async function pool(tasks, size) {
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(size, tasks.length) }, async () => { while (next < tasks.length) await tasks[next++](); }));
+}
+
+// post 为 /posts/{id}.json；fetchImage(url) 返回图片 Blob。加载失败的图片换成占位，不影响导出。
+export async function preparePost(post, { fetchImage, onProgress = () => {} }) {
+  const images = [];
+  const template = document.createElement('template');
+  template.innerHTML = String(post.cooked || '');
+  const body = element('div', { class: 'share-body' }, [postNodes(template.content, images)]);
+  const emoji = new Map();
+  let avatar = null, loaded = 0;
+  const avatarUrl = typeof post.avatar_template === 'string' ? post.avatar_template.replace('{size}', '96') : '';
+  const load = (url, maxWidth) => {
+    const target = new URL(url, location.href);
+    if (!['https:', 'http:'].includes(target.protocol)) throw new Error('unsupported image');
+    return fetchImage(target.href).then(blob => inlineImage(blob, maxWidth));
+  };
+  const step = async job => {
+    try { await job(); } catch (error) { if (error?.name === 'AbortError') throw error; }
+    onProgress(++loaded, images.length + (avatarUrl ? 1 : 0));
+  };
+  const tasks = images.map(item => () => step(async () => {
+    try {
+      const promise = item.kind === 'emoji' ? (emoji.get(item.url) || emoji.set(item.url, load(item.url, 40)).get(item.url)) : load(item.url, 640);
+      const { src, width, height } = await promise;
+      item.node.setAttribute('src', src); item.node.setAttribute('width', String(width)); item.node.setAttribute('height', String(height));
+    } catch (error) {
+      if (error?.name === 'AbortError') throw error;
+      item.node.replaceWith(item.kind === 'emoji' ? document.createTextNode(item.alt) : element('span', { class: 'share-missing', text: '[图片加载失败]' }));
+    }
+  }));
+  if (avatarUrl) tasks.push(() => step(async () => { avatar = await load(avatarUrl, 72); }));
+  await pool(tasks, 4);
+  return { title: post.topic_title, topicId: post.topic_id, slug: post.topic_slug, postNumber: post.post_number,
+    name: post.name, username: post.username, createdAt: Date.parse(post.created_at), avatar, body };
+}
+
+export function postCard(post, theme) {
+  const shown = clean(post.name || post.username || '匿名');
+  const avatar = post.avatar ? element('img', { class: 'share-avatar', alt: '', src: post.avatar.src, width: '36', height: '36' })
+    : element('div', { class: 'share-avatar fallback', text: Array.from(shown)[0]?.toUpperCase() || '?' });
+  const number = Number(post.postNumber) || 1;
+  const link = `https://linux.do/t/${encodeURIComponent(post.slug || 'topic')}/${post.topicId}/${number}`;
+  return frame({ theme, title: post.title,
+    middle: [
+      element('div', { class: 'share-author' }, [avatar, element('div', { class: 'share-author-text' }, [
+        element('div', { class: 'share-name', text: shown }),
+        element('div', { class: 'share-handle', text: `@${clean(post.username || '匿名')} · ${shareTime(post.createdAt)}` }),
+      ])]),
+      element('div', { class: 'share-rule' }),
+      element('div', { class: 'share-post' }, [post.body.cloneNode(true)]),
+    ],
+    foot: [
+      element('div', { class: 'share-foot-row' }, [element('span', { text: number === 1 ? '#1 · 楼主' : `#${number} 楼` })]),
+      element('div', { class: 'share-foot-row' }, [uiIcon('link'), element('span', { class: 'share-link', text: link })]),
+    ] });
 }
 
 // 在隔离的影子根里排版取高度，再经 SVG foreignObject 画到 canvas，不加载任何外部资源。

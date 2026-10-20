@@ -10,7 +10,7 @@
   ];
   document.querySelectorAll('main article').forEach((article, index) => {
     const author = document.createElement('small'); author.textContent = `${['北窗', '松间', '行舟'][index]} · #${index + 1}`;
-    const text = document.createElement('p'); text.textContent = paragraphs[index]; article.replaceChildren(author, text);
+    const text = document.createElement('p'); text.textContent = paragraphs[index]; article.replaceChildren(author, text, ...article.querySelectorAll(':scope > nav.post-controls'));
   });
   const root = document.querySelector('#linuxdo-ai-root').shadowRoot;
   root.querySelector('.launcher').click();

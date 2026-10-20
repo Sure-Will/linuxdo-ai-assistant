@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linux.do AI 阅读助手
 // @namespace    sure.linuxdo.ai
-// @version      0.1.9
+// @version      0.1.10
 // @description  自选模型，流式总结、连续追问、上下文范围和本地历史。适用于 Chrome 标签页与 PWA。
 // @author       Sure
 // @homepageURL  https://github.com/Sure-Will/linuxdo-ai-assistant
@@ -439,7 +439,7 @@ function uiIcon(name) {
     refresh: 'M20 10a8 8 0 0 0-13.7-4L3 9m0-6v6h6m-5 5a8 8 0 0 0 13.7 4L21 15m0 6v-6h-6',
     copy: 'M9 9h11v12H9Zm-4 6H3V3h11v2',
     check: 'm5 12 4 4L19 6',
-    share: 'M12 15V4m-4 4 4-4 4 4M8 11H6v9h12v-9h-2',
+    image: 'M4 5h16v14H4Zm0 11 4.5-4.5L12 15l2.5-2.5L20 18M15 9h.01',
     user: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 8a7 7 0 0 1 14 0',
     link: 'M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7',
   };
@@ -566,7 +566,7 @@ const shareStyles = `
 .share-body { padding: 12px; border-radius: 8px; background: var(--card); overflow-wrap: anywhere; }
 .share-body.plain { white-space: pre-wrap; }
 .share-body > :first-child { margin-top: 0; }
-.share-body > :last-child { margin-bottom: 0; }
+.share-body > :last-child, .share-body :is(blockquote, li, td, th, .share-quote, .share-details) > :last-child { margin-bottom: 0; }
 .share-body p { margin: 0 0 10px; }
 .share-body h2, .share-body h3, .share-body h4 { margin: 16px 0 8px; font-size: 15px; line-height: 1.5; font-weight: 650; color: ${mix(92)}; }
 .share-body ul, .share-body ol { margin: 8px 0 12px; padding-left: 22px; }
@@ -582,6 +582,25 @@ const shareStyles = `
 .share-body table { width: 100%; margin: 10px 0; border-collapse: collapse; font-size: 12px; }
 .share-body th, .share-body td { padding: 5px 6px; border: 1px solid ${mix(14)}; text-align: left; background: transparent; }
 .share-body th { background: ${mix(5)}; }
+.share-author { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.share-avatar { flex: none; width: 36px; height: 36px; border-radius: 50%; box-shadow: 0 0 0 1px ${mix(10)}; }
+.share-avatar.fallback { display: grid; place-items: center; background: ${mix(12)}; color: ${mix(70)}; font-size: 15px; font-weight: 600; }
+.share-author-text { min-width: 0; line-height: 1.45; }
+.share-name { font-size: 14px; font-weight: 500; color: ${mix(85)}; overflow-wrap: anywhere; }
+.share-handle { font-size: 12px; color: ${mix(60)}; overflow-wrap: anywhere; }
+.share-post { padding: 12px 0 16px; }
+.share-body .share-image { display: block; max-width: 100%; height: auto; margin: 8px 0; border-radius: 6px; }
+.share-body .share-emoji { display: inline; width: 1.25em; height: 1.25em; margin: 0 1px; vertical-align: -0.25em; }
+.share-body .share-missing { display: block; margin: 8px 0; padding: 10px; border-radius: 6px; background: ${mix(6)}; color: ${mix(50)}; font-size: 12px; text-align: center; }
+.share-body .share-quote { margin: 10px 0; padding: 8px 10px; border-left: 2px solid ${mix(20)}; border-radius: 0 6px 6px 0; background: ${mix(4)}; }
+.share-body .share-quote-title { margin-bottom: 4px; font-size: 12px; color: ${mix(60)}; }
+.share-body .share-quote blockquote { margin: 0; padding: 0; border: 0; color: inherit; }
+.share-body .share-onebox { margin: 10px 0; padding: 8px 10px; border: 1px solid ${mix(12)}; border-radius: 6px; }
+.share-body .share-onebox-title { font-weight: 600; color: ${mix(90)}; }
+.share-body .share-onebox-text { font-size: 12px; color: ${mix(65)}; }
+.share-body .share-onebox-host { font-size: 11px; color: ${mix(50)}; }
+.share-body .share-placeholder, .share-body .share-spoiler { padding: 0 4px; border-radius: 4px; background: ${mix(10)}; color: ${mix(55)}; font-size: 12px; }
+.share-body .share-details-summary { font-weight: 600; }
 .share-foot { padding-top: 12px; font-size: 11px; color: ${mix(60)}; }
 .share-foot-row { display: flex; align-items: center; gap: 4px; }
 .share-foot-row + .share-foot-row { margin-top: 6px; }
@@ -614,9 +633,20 @@ function shareTime(value) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+function frame({ theme, title, badge, middle, foot }) {
+  const colors = SHARE_THEMES[theme] || SHARE_THEMES.light;
+  return element('div', { class: 'share-card', style: `--bg: ${colors.bg}; --card: ${colors.card}; --fg: ${colors.fg}; --accent: ${colors.accent};` }, [
+    element('style', { text: shareStyles }),
+    element('div', { class: 'share-head' }, [logo(), element('span', { class: 'share-brand', text: 'LINUX DO' }), ...(badge ? [badge] : [])]),
+    element('div', { class: 'share-title', text: clean(title) || '当前话题' }),
+    ...middle,
+    element('div', { class: 'share-rule' }),
+    element('div', { class: 'share-foot' }, foot),
+  ]);
+}
+
 // messages: [{ role, content, model }]；多条时像 FluxDO 一样标注“提问 / AI 回复”。
 function shareCard({ title, topicId, messages, theme, time }) {
-  const colors = SHARE_THEMES[theme] || SHARE_THEMES.light;
   const labeled = messages.length > 1;
   const items = messages.map(message => {
     const user = message.role === 'user';
@@ -626,19 +656,137 @@ function shareCard({ title, topicId, messages, theme, time }) {
       element('span', { text: user ? '提问' : `AI 回复${message.model ? ` · ${message.model}` : ''}` })]) : null;
     return element('div', { class: 'share-message' }, role ? [role, body] : [body]);
   });
-  return element('div', { class: 'share-card', style: `--bg: ${colors.bg}; --card: ${colors.card}; --fg: ${colors.fg}; --accent: ${colors.accent};` }, [
-    element('style', { text: shareStyles }),
-    element('div', { class: 'share-head' }, [logo(), element('span', { class: 'share-brand', text: 'LINUX DO' }),
-      element('span', { class: 'share-badge' }, [aiIcon(), element('span', { text: 'AI 助手' })])]),
-    element('div', { class: 'share-title', text: clean(title) || '当前话题' }),
-    element('div', { class: 'share-rule' }),
-    element('div', { class: 'share-messages' }, items),
-    element('div', { class: 'share-rule' }),
-    element('div', { class: 'share-foot' }, [
+  return frame({ theme, title, badge: element('span', { class: 'share-badge' }, [aiIcon(), element('span', { text: 'AI 助手' })]),
+    middle: [element('div', { class: 'share-rule' }), element('div', { class: 'share-messages' }, items)],
+    foot: [
       element('div', { class: 'share-foot-row' }, [aiIcon(), element('span', { text: '由 Linux.do AI 阅读助手生成' }), element('span', { class: 'share-time', text: time })]),
       element('div', { class: 'share-foot-row' }, [uiIcon('link'), element('span', { class: 'share-link', text: `https://linux.do/t/${topicId}` })]),
-    ]),
-  ]);
+    ] });
+}
+
+// 帖子正文来自 Discourse 服务端渲染的 cooked HTML：在惰性模板中解析，只按白名单重建节点，不复制任何属性。
+const POST_TAGS = { P: 'p', BR: 'br', HR: 'hr', STRONG: 'strong', B: 'strong', EM: 'em', I: 'em', DEL: 'del', S: 'del', INS: 'u', U: 'u', SUP: 'sup', SUB: 'sub', MARK: 'mark',
+  BLOCKQUOTE: 'blockquote', UL: 'ul', OL: 'ol', LI: 'li', TABLE: 'table', THEAD: 'thead', TBODY: 'tbody', TR: 'tr', TH: 'th', TD: 'td',
+  H1: 'h2', H2: 'h2', H3: 'h3', H4: 'h4', H5: 'h4', H6: 'h4' };
+const PLACEHOLDERS = { VIDEO: '[视频]', AUDIO: '[音频]', IFRAME: '[嵌入内容]' };
+const DROPPED = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'OBJECT', 'EMBED', 'FORM', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'CANVAS', 'svg']);
+const MAX_POST_IMAGES = 12;
+const placeholder = text => element('span', { class: 'share-placeholder', text });
+function postNodes(node, images) {
+  const fragment = document.createDocumentFragment();
+  for (const child of node.childNodes) {
+    if (child.nodeType === Node.TEXT_NODE) { fragment.append(document.createTextNode(clean(child.textContent))); continue; }
+    if (child.nodeType !== Node.ELEMENT_NODE) continue;
+    const tag = child.tagName, has = name => child.classList.contains(name);
+    if (DROPPED.has(tag) || has('meta') || has('anchor') || has('quote-controls')) continue;
+    if (PLACEHOLDERS[tag]) fragment.append(placeholder(PLACEHOLDERS[tag]));
+    else if (has('video-placeholder-container') || has('lazy-video-container')) fragment.append(placeholder('[视频]'));
+    else if (has('poll')) fragment.append(placeholder('[投票]'));
+    else if (has('spoiler') || has('spoiled')) fragment.append(element('span', { class: 'share-spoiler', text: '（剧透内容）' }));
+    else if (tag === 'IMG') {
+      const url = child.getAttribute('src') || '', emoji = has('emoji');
+      if (has('avatar') || has('site-icon') || !url) continue;
+      const kind = emoji ? 'emoji' : 'image';
+      if (kind === 'image' && images.filter(item => item.kind === 'image').length >= MAX_POST_IMAGES) { fragment.append(placeholder('[图片]')); continue; }
+      const image = element('img', { class: emoji ? 'share-emoji' : 'share-image', alt: '' });
+      images.push({ node: image, url, kind, alt: clean(child.getAttribute('alt') || child.getAttribute('title') || '') });
+      fragment.append(image);
+    } else if (tag === 'ASIDE' && has('quote')) {
+      const title = child.dataset.username ? `${child.dataset.username}:` : clean(child.querySelector('.title')?.textContent.trim());
+      const quote = child.querySelector('blockquote');
+      fragment.append(element('div', { class: 'share-quote' }, [element('div', { class: 'share-quote-title', text: title || '引用' }), element('blockquote', {}, [quote ? postNodes(quote, images) : ''])]));
+    } else if (has('onebox') && !has('inline-onebox')) {
+      const heading = child.querySelector('h3, h4')?.textContent.trim() || child.querySelector('header a, a')?.textContent.trim() || '';
+      let host = '';
+      try { host = new URL(child.dataset.oneboxSrc || child.querySelector('a[href]')?.getAttribute('href') || '', 'https://linux.do').hostname; } catch { /* 无链接时只显示标题。 */ }
+      const text = clean(child.querySelector('p')?.textContent.trim() || '');
+      fragment.append(element('div', { class: 'share-onebox' }, [element('div', { class: 'share-onebox-title', text: clean(heading) || host || '链接' }),
+        ...(text ? [element('div', { class: 'share-onebox-text', text: text.length > 120 ? `${text.slice(0, 120)}…` : text })] : []),
+        ...(host ? [element('div', { class: 'share-onebox-host', text: host })] : [])]));
+    } else if (tag === 'PRE') fragment.append(element('pre', {}, [element('code', { text: clean(child.textContent) })]));
+    else if (tag === 'CODE' || tag === 'KBD') fragment.append(element('code', { text: clean(child.textContent) }));
+    else if (tag === 'A') fragment.append(element('a', {}, [postNodes(child, images)]));
+    else if (tag === 'DETAILS') {
+      const summary = child.querySelector(':scope > summary');
+      const rest = document.createDocumentFragment();
+      for (const part of child.childNodes) if (part !== summary) rest.append(part.cloneNode(true));
+      fragment.append(element('div', { class: 'share-details' }, [element('p', { class: 'share-details-summary', text: clean(summary?.textContent.trim() || '详情') }), postNodes(rest, images)]));
+    } else if (POST_TAGS[tag]) fragment.append(element(POST_TAGS[tag], {}, [postNodes(child, images)]));
+    else fragment.append(postNodes(child, images));
+  }
+  return fragment;
+}
+
+// 图片按卡片宽度的 2 倍缩放后转成 data URL；PNG、GIF、WebP 保留透明，其余用 JPEG 控制体积。
+async function inlineImage(blob, maxWidth) {
+  const bitmap = await createImageBitmap(blob);
+  try {
+    const scale = Math.min(1, maxWidth / bitmap.width);
+    const width = Math.max(1, Math.round(bitmap.width * scale)), height = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
+    canvas.getContext('2d').drawImage(bitmap, 0, 0, width, height);
+    const alpha = /png|gif|webp/i.test(blob.type);
+    return { src: canvas.toDataURL(alpha ? 'image/png' : 'image/jpeg', 0.88), width, height };
+  } finally { bitmap.close(); }
+}
+async function pool(tasks, size) {
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(size, tasks.length) }, async () => { while (next < tasks.length) await tasks[next++](); }));
+}
+
+// post 为 /posts/{id}.json；fetchImage(url) 返回图片 Blob。加载失败的图片换成占位，不影响导出。
+async function preparePost(post, { fetchImage, onProgress = () => {} }) {
+  const images = [];
+  const template = document.createElement('template');
+  template.innerHTML = String(post.cooked || '');
+  const body = element('div', { class: 'share-body' }, [postNodes(template.content, images)]);
+  const emoji = new Map();
+  let avatar = null, loaded = 0;
+  const avatarUrl = typeof post.avatar_template === 'string' ? post.avatar_template.replace('{size}', '96') : '';
+  const load = (url, maxWidth) => {
+    const target = new URL(url, location.href);
+    if (!['https:', 'http:'].includes(target.protocol)) throw new Error('unsupported image');
+    return fetchImage(target.href).then(blob => inlineImage(blob, maxWidth));
+  };
+  const step = async job => {
+    try { await job(); } catch (error) { if (error?.name === 'AbortError') throw error; }
+    onProgress(++loaded, images.length + (avatarUrl ? 1 : 0));
+  };
+  const tasks = images.map(item => () => step(async () => {
+    try {
+      const promise = item.kind === 'emoji' ? (emoji.get(item.url) || emoji.set(item.url, load(item.url, 40)).get(item.url)) : load(item.url, 640);
+      const { src, width, height } = await promise;
+      item.node.setAttribute('src', src); item.node.setAttribute('width', String(width)); item.node.setAttribute('height', String(height));
+    } catch (error) {
+      if (error?.name === 'AbortError') throw error;
+      item.node.replaceWith(item.kind === 'emoji' ? document.createTextNode(item.alt) : element('span', { class: 'share-missing', text: '[图片加载失败]' }));
+    }
+  }));
+  if (avatarUrl) tasks.push(() => step(async () => { avatar = await load(avatarUrl, 72); }));
+  await pool(tasks, 4);
+  return { title: post.topic_title, topicId: post.topic_id, slug: post.topic_slug, postNumber: post.post_number,
+    name: post.name, username: post.username, createdAt: Date.parse(post.created_at), avatar, body };
+}
+
+function postCard(post, theme) {
+  const shown = clean(post.name || post.username || '匿名');
+  const avatar = post.avatar ? element('img', { class: 'share-avatar', alt: '', src: post.avatar.src, width: '36', height: '36' })
+    : element('div', { class: 'share-avatar fallback', text: Array.from(shown)[0]?.toUpperCase() || '?' });
+  const number = Number(post.postNumber) || 1;
+  const link = `https://linux.do/t/${encodeURIComponent(post.slug || 'topic')}/${post.topicId}/${number}`;
+  return frame({ theme, title: post.title,
+    middle: [
+      element('div', { class: 'share-author' }, [avatar, element('div', { class: 'share-author-text' }, [
+        element('div', { class: 'share-name', text: shown }),
+        element('div', { class: 'share-handle', text: `@${clean(post.username || '匿名')} · ${shareTime(post.createdAt)}` }),
+      ])]),
+      element('div', { class: 'share-rule' }),
+      element('div', { class: 'share-post' }, [post.body.cloneNode(true)]),
+    ],
+    foot: [
+      element('div', { class: 'share-foot-row' }, [element('span', { text: number === 1 ? '#1 · 楼主' : `#${number} 楼` })]),
+      element('div', { class: 'share-foot-row' }, [uiIcon('link'), element('span', { class: 'share-link', text: link })]),
+    ] });
 }
 
 // 在隔离的影子根里排版取高度，再经 SVG foreignObject 画到 canvas，不加载任何外部资源。
@@ -704,6 +852,7 @@ const pageStyle = element('style', { text: `
   #linuxdo-ai-topic-button .linuxdo-ai-icon { width: 1em; height: 1em; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
   #linuxdo-ai-topic-button[aria-expanded="true"] { color: var(--tertiary); }
   @media (pointer: fine) { #linuxdo-ai-topic-button:active { transform: translateY(1px); } }
+  .linuxdo-ai-post-export .ui-icon { width: 1.15em; height: 1.15em; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 ` });
 document.head.append(pageStyle);
 const panel = element('aside', { class: 'panel', role: 'dialog', 'aria-label': '话题总结', 'aria-busy': 'false', tabindex: '-1', hidden: true });
@@ -714,7 +863,7 @@ const panelTitle = element('strong', { text: '话题总结' });
 const backButton = iconButton('返回对话', 'back', () => setView('chat'), { hidden: true });
 const moreButton = iconButton('更多操作', 'more', event => togglePopover('more', event), { 'aria-expanded': 'false', 'aria-controls': 'more-menu' });
 const settingsButton = element('button', { class: 'menu-item', type: 'button', 'aria-label': '模型设置', onClick: () => setView('settings') }, [uiIcon('settings'), element('span', { text: '模型设置' })]);
-const exportButton = iconButton('导出图片', 'share', () => setView('export'));
+const exportButton = iconButton('导出图片', 'image', () => { shot.source = null; setView('export'); });
 const closeButton = iconButton('关闭 AI 面板', 'close', event => closePanel({ instant: event.detail === 0 }));
 panel.append(element('header', { class: 'head' }, [
   element('div', { class: 'head-row' }, [element('div', { class: 'brand' }, [backButton, panelTitle]), element('div', { class: 'actions' }, [moreButton, exportButton, closeButton])]),
@@ -789,7 +938,8 @@ const composer = element('form', { class: 'composer', onSubmit: event => { event
     element('div', { class: 'send-slot' }, [stopButton, sendButton]),
   ])]),
 ]);
-const shot = { theme: null, blob: null, token: 0 };
+// source 为 null 时导出当前对话，为 { postId } 时导出该楼；post 缓存已内联图片的帖子，切换背景不重新下载。
+const shot = { theme: null, blob: null, token: 0, source: null, post: null, controller: null };
 const exportPreview = element('div', { class: 'export-preview', 'aria-busy': 'false' });
 const exportThemes = Object.entries(SHARE_THEMES).map(([value, theme]) => element('button', {
   type: 'button', class: 'quiet theme-option', 'aria-pressed': 'false', 'data-value': value,
@@ -1058,8 +1208,9 @@ function setStatus(text, error = false) {
 }
 function setView(view) {
   if (view !== 'chat' && state.task) return;
-  if (view === 'export' && !exportMessages().length) return;
+  if (view === 'export' && !shot.source && !exportMessages().length) return;
   cancelProbe(); testResult.hidden = true; clearExport();
+  if (view !== 'export') shot.source = null;
   state.view = view;
   const chat = view === 'chat';
   closePopover();
@@ -1254,23 +1405,70 @@ function pageIsDark() {
   return r * 0.299 + g * 0.587 + b * 0.114 < 128;
 }
 function clearExport() {
-  shot.token++; shot.blob = null; exportPreview.replaceChildren(); exportPreview.setAttribute('aria-busy', 'false');
+  shot.token++; shot.blob = null; shot.post = null; shot.controller?.abort(); shot.controller = null;
+  exportPreview.replaceChildren(); exportPreview.setAttribute('aria-busy', 'false');
+}
+// 同站或带 CORS 的图片直接读取；其余经 GM_xmlhttpRequest（首次访问新域名时油猴会询问是否允许）。
+async function fetchImage(url, signal) {
+  const target = new URL(url);
+  const timeout = AbortSignal.any([signal, AbortSignal.timeout(20_000)]);
+  if (target.origin === location.origin) {
+    const response = await fetch(target, { credentials: 'same-origin', signal: timeout });
+    if (!response.ok) throw new Error(`图片读取失败（HTTP ${response.status}）`);
+    return response.blob();
+  }
+  try {
+    const response = await fetch(target, { mode: 'cors', credentials: 'omit', signal: timeout });
+    if (response.ok) return response.blob();
+  } catch (error) { if (signal.aborted) throw abortError(); }
+  return new Promise((resolve, reject) => {
+    const handle = GM_xmlhttpRequest({ method: 'GET', url: target.href, responseType: 'blob', anonymous: true, timeout: 20_000,
+      onload: response => {
+        const body = response.response, type = body?.type || /content-type:\s*([^;\r\n]+)/i.exec(response.responseHeaders || '')?.[1] || '';
+        // 油猴返回的 Blob 可能属于另一个运行环境，重新包装后再交给 createImageBitmap。
+        if (response.status >= 200 && response.status < 300 && body) resolve(new Blob([body], { type })); else reject(new Error('图片读取失败'));
+      },
+      onerror: () => reject(new Error('图片读取失败')), ontimeout: () => reject(new Error('图片读取超时')), onabort: () => reject(abortError()) });
+    signal.addEventListener('abort', () => { handle?.abort?.(); reject(abortError()); }, { once: true });
+  });
+}
+async function loadPost(postId, signal) {
+  setStatus('正在读取帖子…');
+  const json = await getJson(`/posts/${postId}.json`, signal);
+  if (String(json.topic_id) !== String(state.topicId)) throw new Error('这一楼不属于当前话题，请刷新页面后重试。');
+  const post = await preparePost(json, { fetchImage: url => fetchImage(url, signal),
+    onProgress: (loaded, total) => { if (!signal.aborted) setStatus(`正在加载图片 ${loaded}/${total}…`); } });
+  checkAbort(signal);
+  setStatus('');
+  return post;
+}
+async function exportCard() {
+  if (shot.source) {
+    if (shot.post?.postId !== shot.source.postId) {
+      shot.controller = new AbortController();
+      shot.post = { postId: shot.source.postId, ready: loadPost(shot.source.postId, shot.controller.signal) };
+    }
+    return postCard(await shot.post.ready, shot.theme);
+  }
+  const messages = exportMessages();
+  return shareCard({ title: state.record?.title, topicId: state.topicId, theme: shot.theme, time: shareTime(messages.at(-1)?.createdAt),
+    messages: messages.map(m => ({ role: m.role, model: m.model, content: m.role === 'user' && m.content === SUMMARY_PROMPT ? '总结这个话题' : m.content })) });
 }
 async function drawExport() {
-  const token = ++shot.token, messages = exportMessages();
+  const token = ++shot.token;
   for (const option of exportThemes) option.setAttribute('aria-pressed', String(option.dataset.value === shot.theme));
   copyImageButton.disabled = saveImageButton.disabled = true; shot.blob = null;
   exportPreview.setAttribute('aria-busy', 'true');
   try {
-    const card = shareCard({ title: state.record?.title, topicId: state.topicId, theme: shot.theme, time: shareTime(messages.at(-1)?.createdAt),
-      messages: messages.map(m => ({ role: m.role, model: m.model, content: m.role === 'user' && m.content === SUMMARY_PROMPT ? '总结这个话题' : m.content })) });
+    const card = await exportCard();
+    if (token !== shot.token) return;
     const { canvas, blob } = await renderShareImage(card);
     if (token !== shot.token) return;
     canvas.setAttribute('role', 'img'); canvas.setAttribute('aria-label', `导出图片预览（${SHARE_THEMES[shot.theme].label}）`);
     exportPreview.replaceChildren(canvas); shot.blob = blob;
     copyImageButton.disabled = saveImageButton.disabled = false;
   } catch (error) {
-    if (token === shot.token) setStatus(error.message || '图片生成失败，请重试。', true);
+    if (token === shot.token && error.name !== 'AbortError') setStatus(error.message || '图片生成失败，请重试。', true);
   } finally { if (token === shot.token) exportPreview.setAttribute('aria-busy', 'false'); }
 }
 async function copyExport() {
@@ -1284,7 +1482,7 @@ async function copyExport() {
 function saveExport() {
   if (!shot.blob) return;
   const url = URL.createObjectURL(shot.blob);
-  const name = `linuxdo-${state.topicId}-${shareTime(Date.now()).replace(/[-: ]/g, '').replace(/^(\d{8})/, '$1-')}.png`;
+  const name = `linuxdo-${state.topicId}${shot.source && shot.post ? '-post' : ''}-${shareTime(Date.now()).replace(/[-: ]/g, '').replace(/^(\d{8})/, '$1-')}.png`;
   element('a', { href: url, download: name }).click();
   setTimeout(() => URL.revokeObjectURL(url), 30_000);
 }
@@ -1381,6 +1579,32 @@ async function send(rawQuestion, replaceLast = false) {
   }
 }
 
+// 帖子操作栏的“…”默认收起书签、举报、编辑等按钮。普通话题展开只改本地状态、不发请求，随帖子渲染自动点开；
+// 私信展开会读取已读名单，每楼都点会产生大量请求，因此保持原样。
+function expandPostMenus() {
+  if (document.body.classList.contains('archetype-private_message')) return;
+  for (const button of document.querySelectorAll('nav.post-controls.collapsed .show-more-actions')) button.click();
+}
+// 在每楼“复制链接”右侧放导出按钮；Discourse 重绘操作栏后补回，保持位置且不重复。
+function placePostExports() {
+  for (const actions of document.querySelectorAll('nav.post-controls .actions')) {
+    const anchor = actions.querySelector(':scope > .post-action-menu__copy-link, :scope > .post-action-menu__share');
+    const placed = actions.querySelectorAll(':scope > .linuxdo-ai-post-export');
+    if (anchor && placed.length === 1 && anchor.nextElementSibling === placed[0]) continue;
+    placed.forEach(node => node.remove());
+    if (!anchor) continue;
+    anchor.after(element('button', { type: 'button', class: 'btn no-text btn-icon btn-flat linuxdo-ai-post-export', title: '导出图片', 'aria-label': '把这一楼导出为图片',
+      onClick: event => { event.preventDefault(); event.stopPropagation(); exportPost(event.currentTarget); } }, [uiIcon('image')]));
+  }
+}
+function exportPost(button) {
+  const postId = Number(button.closest('article[data-post-id]')?.dataset.postId);
+  if (!Number.isSafeInteger(postId) || postId <= 0 || !state.topicId) return;
+  if (!state.open) openPanel();
+  if (state.task) { setStatus('AI 正在生成，完成后再导出图片。', true); return; }
+  shot.source = { postId }; setView('export');
+}
+
 function reconcile() {
   const id = topicIdFromUrl(location.href);
   if (id !== state.topicId) {
@@ -1395,6 +1619,7 @@ function reconcile() {
   }
   if (!id) { launcher.hidden = true; timelineButton?.remove(); timelineButton = null; return; }
   if (!host.isConnected) document.body.append(host);
+  expandPostMenus(); placePostExports();
   const heading = document.querySelector('#topic-title h1[data-topic-id]');
   if (heading?.dataset.topicId === id) {
     const text = heading.querySelector('.fancy-title')?.textContent.trim() || heading.textContent.trim();

@@ -1,6 +1,6 @@
-import { SCOPES, EFFORTS, SUMMARY_PROMPT, topicIdFromUrl, validateConfig, isDeepSeek, selectedEffort, measureModel, collectTopic, buildMessages, streamChat, checkAbort } from './core.js';
+import { SCOPES, EFFORTS, SUMMARY_PROMPT, topicIdFromUrl, validateConfig, isDeepSeek, selectedEffort, measureModel, collectTopic, buildMessages, streamChat, checkAbort, abortError } from './core.js';
 import { element, aiIcon, uiIcon, renderMarkdown, htmlToText } from './render.js';
-import { SHARE_THEMES, shareCard, shareTime, renderShareImage } from './share.js';
+import { SHARE_THEMES, shareCard, shareTime, renderShareImage, preparePost, postCard } from './share.js';
 import styles from './style.css';
 
 const PREFIX = 'linuxdo-ai:v1:';
@@ -34,6 +34,7 @@ const pageStyle = element('style', { text: `
   #linuxdo-ai-topic-button .linuxdo-ai-icon { width: 1em; height: 1em; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
   #linuxdo-ai-topic-button[aria-expanded="true"] { color: var(--tertiary); }
   @media (pointer: fine) { #linuxdo-ai-topic-button:active { transform: translateY(1px); } }
+  .linuxdo-ai-post-export .ui-icon { width: 1.15em; height: 1.15em; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 ` });
 document.head.append(pageStyle);
 const panel = element('aside', { class: 'panel', role: 'dialog', 'aria-label': '话题总结', 'aria-busy': 'false', tabindex: '-1', hidden: true });
@@ -44,7 +45,7 @@ const panelTitle = element('strong', { text: '话题总结' });
 const backButton = iconButton('返回对话', 'back', () => setView('chat'), { hidden: true });
 const moreButton = iconButton('更多操作', 'more', event => togglePopover('more', event), { 'aria-expanded': 'false', 'aria-controls': 'more-menu' });
 const settingsButton = element('button', { class: 'menu-item', type: 'button', 'aria-label': '模型设置', onClick: () => setView('settings') }, [uiIcon('settings'), element('span', { text: '模型设置' })]);
-const exportButton = iconButton('导出图片', 'share', () => setView('export'));
+const exportButton = iconButton('导出图片', 'image', () => { shot.source = null; setView('export'); });
 const closeButton = iconButton('关闭 AI 面板', 'close', event => closePanel({ instant: event.detail === 0 }));
 panel.append(element('header', { class: 'head' }, [
   element('div', { class: 'head-row' }, [element('div', { class: 'brand' }, [backButton, panelTitle]), element('div', { class: 'actions' }, [moreButton, exportButton, closeButton])]),
@@ -119,7 +120,8 @@ const composer = element('form', { class: 'composer', onSubmit: event => { event
     element('div', { class: 'send-slot' }, [stopButton, sendButton]),
   ])]),
 ]);
-const shot = { theme: null, blob: null, token: 0 };
+// source 为 null 时导出当前对话，为 { postId } 时导出该楼；post 缓存已内联图片的帖子，切换背景不重新下载。
+const shot = { theme: null, blob: null, token: 0, source: null, post: null, controller: null };
 const exportPreview = element('div', { class: 'export-preview', 'aria-busy': 'false' });
 const exportThemes = Object.entries(SHARE_THEMES).map(([value, theme]) => element('button', {
   type: 'button', class: 'quiet theme-option', 'aria-pressed': 'false', 'data-value': value,
@@ -388,8 +390,9 @@ function setStatus(text, error = false) {
 }
 function setView(view) {
   if (view !== 'chat' && state.task) return;
-  if (view === 'export' && !exportMessages().length) return;
+  if (view === 'export' && !shot.source && !exportMessages().length) return;
   cancelProbe(); testResult.hidden = true; clearExport();
+  if (view !== 'export') shot.source = null;
   state.view = view;
   const chat = view === 'chat';
   closePopover();
@@ -584,23 +587,70 @@ function pageIsDark() {
   return r * 0.299 + g * 0.587 + b * 0.114 < 128;
 }
 function clearExport() {
-  shot.token++; shot.blob = null; exportPreview.replaceChildren(); exportPreview.setAttribute('aria-busy', 'false');
+  shot.token++; shot.blob = null; shot.post = null; shot.controller?.abort(); shot.controller = null;
+  exportPreview.replaceChildren(); exportPreview.setAttribute('aria-busy', 'false');
+}
+// 同站或带 CORS 的图片直接读取；其余经 GM_xmlhttpRequest（首次访问新域名时油猴会询问是否允许）。
+async function fetchImage(url, signal) {
+  const target = new URL(url);
+  const timeout = AbortSignal.any([signal, AbortSignal.timeout(20_000)]);
+  if (target.origin === location.origin) {
+    const response = await fetch(target, { credentials: 'same-origin', signal: timeout });
+    if (!response.ok) throw new Error(`图片读取失败（HTTP ${response.status}）`);
+    return response.blob();
+  }
+  try {
+    const response = await fetch(target, { mode: 'cors', credentials: 'omit', signal: timeout });
+    if (response.ok) return response.blob();
+  } catch (error) { if (signal.aborted) throw abortError(); }
+  return new Promise((resolve, reject) => {
+    const handle = GM_xmlhttpRequest({ method: 'GET', url: target.href, responseType: 'blob', anonymous: true, timeout: 20_000,
+      onload: response => {
+        const body = response.response, type = body?.type || /content-type:\s*([^;\r\n]+)/i.exec(response.responseHeaders || '')?.[1] || '';
+        // 油猴返回的 Blob 可能属于另一个运行环境，重新包装后再交给 createImageBitmap。
+        if (response.status >= 200 && response.status < 300 && body) resolve(new Blob([body], { type })); else reject(new Error('图片读取失败'));
+      },
+      onerror: () => reject(new Error('图片读取失败')), ontimeout: () => reject(new Error('图片读取超时')), onabort: () => reject(abortError()) });
+    signal.addEventListener('abort', () => { handle?.abort?.(); reject(abortError()); }, { once: true });
+  });
+}
+async function loadPost(postId, signal) {
+  setStatus('正在读取帖子…');
+  const json = await getJson(`/posts/${postId}.json`, signal);
+  if (String(json.topic_id) !== String(state.topicId)) throw new Error('这一楼不属于当前话题，请刷新页面后重试。');
+  const post = await preparePost(json, { fetchImage: url => fetchImage(url, signal),
+    onProgress: (loaded, total) => { if (!signal.aborted) setStatus(`正在加载图片 ${loaded}/${total}…`); } });
+  checkAbort(signal);
+  setStatus('');
+  return post;
+}
+async function exportCard() {
+  if (shot.source) {
+    if (shot.post?.postId !== shot.source.postId) {
+      shot.controller = new AbortController();
+      shot.post = { postId: shot.source.postId, ready: loadPost(shot.source.postId, shot.controller.signal) };
+    }
+    return postCard(await shot.post.ready, shot.theme);
+  }
+  const messages = exportMessages();
+  return shareCard({ title: state.record?.title, topicId: state.topicId, theme: shot.theme, time: shareTime(messages.at(-1)?.createdAt),
+    messages: messages.map(m => ({ role: m.role, model: m.model, content: m.role === 'user' && m.content === SUMMARY_PROMPT ? '总结这个话题' : m.content })) });
 }
 async function drawExport() {
-  const token = ++shot.token, messages = exportMessages();
+  const token = ++shot.token;
   for (const option of exportThemes) option.setAttribute('aria-pressed', String(option.dataset.value === shot.theme));
   copyImageButton.disabled = saveImageButton.disabled = true; shot.blob = null;
   exportPreview.setAttribute('aria-busy', 'true');
   try {
-    const card = shareCard({ title: state.record?.title, topicId: state.topicId, theme: shot.theme, time: shareTime(messages.at(-1)?.createdAt),
-      messages: messages.map(m => ({ role: m.role, model: m.model, content: m.role === 'user' && m.content === SUMMARY_PROMPT ? '总结这个话题' : m.content })) });
+    const card = await exportCard();
+    if (token !== shot.token) return;
     const { canvas, blob } = await renderShareImage(card);
     if (token !== shot.token) return;
     canvas.setAttribute('role', 'img'); canvas.setAttribute('aria-label', `导出图片预览（${SHARE_THEMES[shot.theme].label}）`);
     exportPreview.replaceChildren(canvas); shot.blob = blob;
     copyImageButton.disabled = saveImageButton.disabled = false;
   } catch (error) {
-    if (token === shot.token) setStatus(error.message || '图片生成失败，请重试。', true);
+    if (token === shot.token && error.name !== 'AbortError') setStatus(error.message || '图片生成失败，请重试。', true);
   } finally { if (token === shot.token) exportPreview.setAttribute('aria-busy', 'false'); }
 }
 async function copyExport() {
@@ -614,7 +664,7 @@ async function copyExport() {
 function saveExport() {
   if (!shot.blob) return;
   const url = URL.createObjectURL(shot.blob);
-  const name = `linuxdo-${state.topicId}-${shareTime(Date.now()).replace(/[-: ]/g, '').replace(/^(\d{8})/, '$1-')}.png`;
+  const name = `linuxdo-${state.topicId}${shot.source && shot.post ? '-post' : ''}-${shareTime(Date.now()).replace(/[-: ]/g, '').replace(/^(\d{8})/, '$1-')}.png`;
   element('a', { href: url, download: name }).click();
   setTimeout(() => URL.revokeObjectURL(url), 30_000);
 }
@@ -711,6 +761,32 @@ async function send(rawQuestion, replaceLast = false) {
   }
 }
 
+// 帖子操作栏的“…”默认收起书签、举报、编辑等按钮。普通话题展开只改本地状态、不发请求，随帖子渲染自动点开；
+// 私信展开会读取已读名单，每楼都点会产生大量请求，因此保持原样。
+function expandPostMenus() {
+  if (document.body.classList.contains('archetype-private_message')) return;
+  for (const button of document.querySelectorAll('nav.post-controls.collapsed .show-more-actions')) button.click();
+}
+// 在每楼“复制链接”右侧放导出按钮；Discourse 重绘操作栏后补回，保持位置且不重复。
+function placePostExports() {
+  for (const actions of document.querySelectorAll('nav.post-controls .actions')) {
+    const anchor = actions.querySelector(':scope > .post-action-menu__copy-link, :scope > .post-action-menu__share');
+    const placed = actions.querySelectorAll(':scope > .linuxdo-ai-post-export');
+    if (anchor && placed.length === 1 && anchor.nextElementSibling === placed[0]) continue;
+    placed.forEach(node => node.remove());
+    if (!anchor) continue;
+    anchor.after(element('button', { type: 'button', class: 'btn no-text btn-icon btn-flat linuxdo-ai-post-export', title: '导出图片', 'aria-label': '把这一楼导出为图片',
+      onClick: event => { event.preventDefault(); event.stopPropagation(); exportPost(event.currentTarget); } }, [uiIcon('image')]));
+  }
+}
+function exportPost(button) {
+  const postId = Number(button.closest('article[data-post-id]')?.dataset.postId);
+  if (!Number.isSafeInteger(postId) || postId <= 0 || !state.topicId) return;
+  if (!state.open) openPanel();
+  if (state.task) { setStatus('AI 正在生成，完成后再导出图片。', true); return; }
+  shot.source = { postId }; setView('export');
+}
+
 function reconcile() {
   const id = topicIdFromUrl(location.href);
   if (id !== state.topicId) {
@@ -725,6 +801,7 @@ function reconcile() {
   }
   if (!id) { launcher.hidden = true; timelineButton?.remove(); timelineButton = null; return; }
   if (!host.isConnected) document.body.append(host);
+  expandPostMenus(); placePostExports();
   const heading = document.querySelector('#topic-title h1[data-topic-id]');
   if (heading?.dataset.topicId === id) {
     const text = heading.querySelector('.fancy-title')?.textContent.trim() || heading.textContent.trim();

@@ -311,6 +311,58 @@ test('导出图片入口在三个点右侧，生成浅色和深色 PNG，可复�
   assert.equal(await exportButton.isVisible(), false, '设置页不显示导出入口');
 });
 
+test('帖子操作栏的“…”自动展开，新渲染的楼层同样展开，私信保持原样', async t => {
+  const page = await setup(t, undefined, { settings: false });
+  const collapsed = page.locator('main nav.post-controls.collapsed');
+  await page.locator('main nav.post-controls.expanded').nth(2).waitFor();
+  assert.equal(await collapsed.count(), 0);
+  assert.equal(await page.locator('main .post-action-menu__bookmark').count(), 3, '隐藏按钮已渲染');
+  await page.evaluate(() => fixture.addPost());
+  await page.locator('main nav.post-controls.expanded').nth(3).waitFor();
+  assert.equal(await page.evaluate(() => fixture.menuClicks), 4, '每个操作栏只点一次');
+  assert.equal(await page.evaluate(() => fixture.calls.length + fixture.requests.length), 0, '展开不读取帖子也不请求模型');
+  await page.evaluate(() => { document.body.classList.add('archetype-private_message'); fixture.addPost(); });
+  await page.waitForTimeout(200);
+  assert.equal(await collapsed.count(), 1, '私信不自动展开');
+});
+
+test('每楼复制链接右侧有导出按钮，重绘后补回，导出时图片转进图里且不执行帖子脚本', async t => {
+  const page = await setup(t, undefined, { settings: false });
+  const exports = page.locator('main .post-action-menu__copy-link + .linuxdo-ai-post-export');
+  await exports.nth(2).waitFor();
+  assert.equal(await page.locator('main .linuxdo-ai-post-export').count(), 3, '每楼一个且不重复');
+  await page.evaluate(() => fixture.rerenderMenu(1));
+  await exports.nth(2).waitFor();
+  assert.equal(await page.locator('main .linuxdo-ai-post-export').count(), 3, '重绘后补回');
+  await page.getByRole('button', { name: '关闭 AI 面板', exact: true }).click();
+  await exports.nth(1).click();
+  assert.equal(await page.locator('#linuxdo-ai-root .brand strong').innerText(), '导出图片');
+  const canvas = page.locator('#linuxdo-ai-root .export-preview[aria-busy="false"] canvas');
+  await canvas.waitFor();
+  assert.deepEqual(await page.evaluate(() => fixture.calls.filter(path => path.startsWith('/posts/'))), ['/posts/2.json'], '只读取被点击的这一楼');
+  const images = await page.evaluate(() => fixture.imageRequests);
+  assert.ok(images.some(url => url.includes('/fixture-image/emoji/')) && images.some(url => url.includes('/fixture-image/avatar/96.png')), '同站 emoji 与头像直接读取');
+  assert.ok(images.filter(url => url === 'https://cdn.example.test/optimized/table.png').length >= 2, '跨域图片在 CORS 失败后改用油猴请求');
+  assert.equal(images.filter(url => url.includes('/original/')).length, 0, '只取正文中显示的优化图');
+  assert.equal(await page.evaluate(() => window.fixturePostXss), undefined, '帖子里的脚本与事件不执行');
+  assert.equal(await page.locator('#linuxdo-ai-root .status').isVisible(), false, '单张图片失败不阻止导出');
+  const height = await canvas.evaluate(node => node.height);
+  assert.ok(height > 1400, `图片与正文已排入卡片（高 ${height}px）`);
+  for (const [label, file] of [['浅色', 'post-export-light.png'], ['深色', 'post-export-dark.png']]) {
+    await page.getByRole('button', { name: label, exact: true }).click();
+    await page.locator(`#linuxdo-ai-root .export-preview[aria-busy="false"] canvas[aria-label*="${label}"]`).waitFor();
+    const [download] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: '保存图片', exact: true }).click()]);
+    assert.match(download.suggestedFilename(), /^linuxdo-1001-post-\d{8}-\d{4}\.png$/);
+    await download.saveAs(path.join(resultsDir, file));
+  }
+  assert.equal(await page.evaluate(() => fixture.calls.filter(path => path.startsWith('/posts/')).length), 1, '切换背景不重新读取帖子');
+  await page.evaluate(() => fixture.setMode('forum-error'));
+  await exports.nth(2).click();
+  await page.locator('#linuxdo-ai-root .status.error').filter({ hasText: '重新登录或验证' }).waitFor();
+  assert.equal(await page.locator('#linuxdo-ai-root .export-preview canvas').count(), 0);
+  assert.equal(await page.evaluate(() => fixture.requests.length), 0, '导出帖子不请求模型');
+});
+
 test('论坛验证和模型网络错误不会触发自动重试', async t => {
   const page = await setup(t); await configure(page); await page.evaluate(() => fixture.setMode('forum-error'));
   await summary(page).click(); await page.getByRole('status').filter({ hasText: '重新登录或验证' }).waitFor();
