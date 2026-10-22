@@ -119,13 +119,43 @@
   document.getElementById('theme-toggle').onclick = () => document.documentElement.classList.toggle('dark');
   // 模拟 Discourse 帖子操作栏：收起时只渲染常用按钮，点“…”后才渲染隐藏按钮。
   let menuClicks = 0;
+  const actionClicks = [], menuStates = new WeakMap();
+  const menuIcons = { like: 'M12 20 3 11a5 5 0 0 1 9-6 5 5 0 0 1 9 6Z', 'copy-link': 'm9 15 6-6m-7 3-3 3a4 4 0 0 0 6 6l3-3m-1-6 3-3a4 4 0 0 0-6-6L7 6', bookmark: 'M6 3h12v18l-6-4-6 4Z', flag: 'M5 22V3h14l-3 4 3 4H5', edit: 'm4 17 12-12 3 3L7 20H4Z', delete: 'M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15', reply: 'm9 5-6 6 6 6v-5c6 0 9 2 12 6-1-8-5-11-12-11Z', 'show-more': 'M5 12h.01M12 12h.01M19 12h.01' };
+  function menuButton(name, label, state) {
+    const node = document.createElement('button'); node.type = 'button'; node.className = `btn btn-flat post-action-menu__${name}`;
+    node.setAttribute('aria-label', label); node.title = label;
+    node.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${menuIcons[name]}"></path></svg>`;
+    if (name === 'reply') { const text = document.createElement('span'); text.className = 'd-button-label'; text.textContent = label; node.append(text); }
+    if (name === 'like' || name === 'bookmark') {
+      node.setAttribute('aria-pressed', String(state[name])); node.classList.toggle('active', state[name]);
+    }
+    if (name !== 'show-more') node.addEventListener('click', () => {
+      actionClicks.push(name);
+      if (name === 'like' || name === 'bookmark') {
+        state[name] = !state[name]; node.setAttribute('aria-pressed', String(state[name])); node.classList.toggle('active', state[name]);
+      }
+      if (name === 'copy-link') requestAnimationFrame(() => { window.fixture.actionAnchor = node.getBoundingClientRect().toJSON(); });
+    });
+    return node;
+  }
+  function renderPostMenu(nav) {
+    const state = menuStates.get(nav), actions = nav.querySelector('.actions');
+    const reaction = document.createElement('div'); reaction.className = 'discourse-reactions-actions-button-shim';
+    reaction.append(menuButton('like', '点赞', state));
+    const buttons = [reaction, menuButton('copy-link', '复制链接', state)];
+    if (state.expanded) {
+      buttons.push(menuButton('bookmark', '收藏', state), menuButton('flag', '举报', state), menuButton('edit', '编辑', state), menuButton('delete', '删除', state));
+    } else {
+      const more = menuButton('show-more', '显示更多', state); more.classList.add('show-more-actions');
+      more.addEventListener('click', () => { menuClicks++; state.expanded = true; renderPostMenu(nav); }); buttons.push(more);
+    }
+    buttons.push(menuButton('reply', '回复', state));
+    nav.className = `post-controls ${state.expanded ? 'expanded' : 'collapsed'}`; actions.replaceChildren(...buttons);
+  }
   const postMenu = () => {
     const nav = document.createElement('nav'); nav.className = 'post-controls collapsed';
     const actions = document.createElement('div'); actions.className = 'actions';
-    const button = (name, text) => { const node = document.createElement('button'); node.className = `post-action-menu__${name}`; node.textContent = text; return node; };
-    const more = button('show-more', '…'); more.classList.add('show-more-actions');
-    more.addEventListener('click', () => { menuClicks++; nav.className = 'post-controls expanded'; more.replaceWith(button('bookmark', '书签'), button('flag', '举报')); });
-    actions.append(button('like', '赞'), button('copy-link', '链接'), more, button('reply', '回复')); nav.append(actions);
+    nav.append(actions); menuStates.set(nav, { expanded: false, like: false, bookmark: false }); renderPostMenu(nav);
     return nav;
   };
   document.querySelectorAll('main article').forEach((article, index) => { article.dataset.postId = String(index + 1); article.append(postMenu()); });
@@ -133,9 +163,7 @@
   function addPost() { const article = document.createElement('article'); article.dataset.postId = String(++added); article.append(postMenu()); document.querySelector('main').append(article); }
   // 模拟 Glimmer 重绘：整组按钮被替换，脚本插入的按钮随之消失。
   function rerenderMenu(index) {
-    const actions = document.querySelectorAll('main nav.post-controls .actions')[index];
-    const button = (name, text) => { const node = document.createElement('button'); node.className = `post-action-menu__${name}`; node.textContent = text; return node; };
-    actions.replaceChildren(button('like', '赞'), button('copy-link', '链接'), button('bookmark', '书签'), button('reply', '回复'));
+    renderPostMenu(document.querySelectorAll('main nav.post-controls')[index]);
   }
-  window.fixture = { calls, requests, imageRequests, setMode(value) { mode = value; }, storeKey, addPost, rerenderMenu, get menuClicks() { return menuClicks; } };
+  window.fixture = { calls, requests, imageRequests, actionClicks, setMode(value) { mode = value; }, storeKey, addPost, rerenderMenu, get menuClicks() { return menuClicks; } };
 })();

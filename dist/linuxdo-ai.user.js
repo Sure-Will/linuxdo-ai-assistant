@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linux.do AI 阅读助手
 // @namespace    sure.linuxdo.ai
-// @version      0.1.10
+// @version      0.1.11
 // @description  自选模型，流式总结、连续追问、上下文范围和本地历史。适用于 Chrome 标签页与 PWA。
 // @author       Sure
 // @homepageURL  https://github.com/Sure-Will/linuxdo-ai-assistant
@@ -832,6 +832,8 @@ const labels = { first: '仅首帖', '5': '前 5 帖', '10': '前 10 帖', '20':
 const state = { topicId: null, record: null, session: null, task: null, probe: null, config: {}, context: null, open: false, view: 'chat', popover: null };
 const nodes = new Map();
 let storageNotice = '', scheduled = false, timelineButton, lastTrigger, closeTimer;
+const postMenus = new WeakMap(), revealedPostMenus = new WeakSet();
+let activePostMenu = null, postMenuSequence = 0;
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
 
 function readValue(key, fallback) {
@@ -852,7 +854,41 @@ const pageStyle = element('style', { text: `
   #linuxdo-ai-topic-button .linuxdo-ai-icon { width: 1em; height: 1em; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
   #linuxdo-ai-topic-button[aria-expanded="true"] { color: var(--tertiary); }
   @media (pointer: fine) { #linuxdo-ai-topic-button:active { transform: translateY(1px); } }
-  .linuxdo-ai-post-export .ui-icon { width: 1.15em; height: 1.15em; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .linuxdo-ai-post-export .ui-icon, .linuxdo-ai-post-more .ui-icon { width: 1.15em; height: 1.15em; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  nav.post-controls .linuxdo-ai-post-actions { display: flex; align-items: center; gap: 4px; }
+  .linuxdo-ai-post-actions > :not([data-ai-post-kind]), .linuxdo-ai-post-actions > [data-ai-post-kind="native-more"] { display: none !important; }
+  .linuxdo-ai-post-actions > [data-ai-post-kind="like"] { order: 0; }
+  .linuxdo-ai-post-actions > [data-ai-post-kind="reply"] { order: 1; margin-inline: 0; min-width: 40px; min-height: 40px; }
+  .linuxdo-ai-post-actions > [data-ai-post-kind="reply"] .d-button-label { display: none; }
+  .linuxdo-ai-post-actions > [data-ai-post-kind="bookmark"] { order: 2; }
+  .linuxdo-ai-post-actions > [data-ai-post-kind="more"] { order: 3; }
+  .linuxdo-ai-post-more { min-width: 40px; min-height: 40px; display: inline-flex; align-items: center; justify-content: center; }
+  .linuxdo-ai-post-actions > [data-ai-post-kind="secondary"] {
+    position: fixed !important; z-index: 1102; inset: auto !important;
+    left: calc(var(--ai-post-menu-x, 0px) + 6px) !important;
+    top: calc(var(--ai-post-menu-y, 0px) + 6px + var(--ai-post-menu-row, 0) * 40px) !important;
+    width: calc(var(--ai-post-menu-width, 196px) - 12px); height: 40px; box-sizing: border-box;
+    margin: 0 !important; padding: 8px 10px; border: 0; border-radius: 6px;
+    display: flex !important; align-items: center; justify-content: flex-start; gap: 10px;
+    background: var(--secondary); color: var(--primary); font: inherit; font-size: 14px; line-height: 1.4;
+    visibility: hidden; pointer-events: none;
+  }
+  .linuxdo-ai-post-actions > [data-ai-post-kind="secondary"]::after { content: attr(data-ai-post-label); }
+  nav.post-controls .linuxdo-ai-post-actions > [data-ai-post-kind="secondary"] { color: var(--primary); }
+  .linuxdo-ai-post-actions > [data-ai-post-kind="secondary"] > span { display: none; }
+  nav.post-controls .linuxdo-ai-post-actions > [data-ai-post-kind="secondary"] > svg { width: 1.15em; height: 1.15em; flex: none; color: inherit; }
+  .linuxdo-ai-post-actions[data-ai-post-open] > [data-ai-post-kind="secondary"] { visibility: visible; pointer-events: auto; }
+  .linuxdo-ai-post-actions > [hidden] { display: none !important; }
+  .linuxdo-ai-post-menu-surface {
+    position: fixed; z-index: 1101; left: var(--ai-post-menu-x); top: var(--ai-post-menu-y);
+    width: var(--ai-post-menu-width); height: var(--ai-post-menu-height); box-sizing: border-box;
+    border: 1px solid var(--primary-low); border-radius: 10px; background: var(--secondary);
+    box-shadow: 0 8px 24px #0003; display: none;
+  }
+  .linuxdo-ai-post-actions[data-ai-post-open] > .linuxdo-ai-post-menu-surface { display: block; }
+  .linuxdo-ai-post-more:focus-visible, .linuxdo-ai-post-actions > [data-ai-post-kind="secondary"]:focus-visible { outline: 2px solid var(--tertiary); outline-offset: -2px; }
+  @media (hover: hover) { .linuxdo-ai-post-actions > [data-ai-post-kind="secondary"]:hover { background: var(--primary-very-low, var(--primary-low)); } }
+  @media (pointer: fine) { .linuxdo-ai-post-more:active { transform: scale(.96); } }
 ` });
 document.head.append(pageStyle);
 const panel = element('aside', { class: 'panel', role: 'dialog', 'aria-label': '话题总结', 'aria-busy': 'false', tabindex: '-1', hidden: true });
@@ -1579,13 +1615,109 @@ async function send(rawQuestion, replaceLast = false) {
   }
 }
 
-// 帖子操作栏的“…”默认收起书签、举报、编辑等按钮。普通话题展开只改本地状态、不发请求，随帖子渲染自动点开；
-// 私信展开会读取已读名单，每楼都点会产生大量请求，因此保持原样。
-function expandPostMenus() {
-  if (document.body.classList.contains('archetype-private_message')) return;
-  for (const button of document.querySelectorAll('nav.post-controls.collapsed .show-more-actions')) button.click();
+function closePostMenu(restoreFocus = false) {
+  if (!activePostMenu) return;
+  const menu = activePostMenu; activePostMenu = null;
+  menu.actions.removeAttribute('data-ai-post-open'); menu.trigger.setAttribute('aria-expanded', 'false');
+  menu.surface.setAttribute('aria-hidden', 'true');
+  menu.items.forEach(item => { item.inert = true; });
+  if (restoreFocus && menu.trigger.isConnected) menu.trigger.focus();
 }
-// 在每楼“复制链接”右侧放导出按钮；Discourse 重绘操作栏后补回，保持位置且不重复。
+function positionPostMenu(menu) {
+  const rect = menu.trigger.getBoundingClientRect();
+  if (rect.bottom <= 0 || rect.top >= innerHeight) { closePostMenu(); return; }
+  const width = Math.min(196, innerWidth - 16), height = menu.items.length * 40 + 12;
+  const x = Math.max(8, Math.min(rect.right - width, innerWidth - width - 8));
+  const y = rect.bottom + 6 + height <= innerHeight - 8 ? rect.bottom + 6 : Math.max(8, rect.top - height - 6);
+  for (const [key, value] of Object.entries({ x, y, width, height })) menu.actions.style.setProperty(`--ai-post-menu-${key}`, `${value}px`);
+}
+function togglePostMenu(menu) {
+  if (activePostMenu === menu) { closePostMenu(true); return; }
+  closePostMenu(); closePopover(); activePostMenu = menu;
+  positionPostMenu(menu); menu.actions.setAttribute('data-ai-post-open', '');
+  menu.trigger.setAttribute('aria-expanded', 'true'); menu.surface.setAttribute('aria-hidden', 'false');
+  menu.items.forEach(item => { item.inert = false; });
+  menu.items.find(item => !item.disabled)?.focus();
+}
+function postMenuKeydown(event, menu) {
+  const primary = ['like', 'reply', 'bookmark', 'more'].flatMap(kind => {
+    const node = menu.actions.querySelector(`:scope > [data-ai-post-kind="${kind}"]`);
+    return node ? [node.matches('button, a[href]') ? node : node.querySelector('button, a[href]')].filter(button => button && !button.disabled) : [];
+  });
+  if (activePostMenu === menu) {
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closePostMenu(true); return; }
+    if (event.key === 'Tab') {
+      closePostMenu(true);
+      if (event.shiftKey) { event.preventDefault(); primary.at(-2)?.focus(); }
+      return;
+    }
+    if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+      event.preventDefault(); event.stopPropagation();
+      const items = menu.items.filter(item => !item.disabled), index = items.indexOf(document.activeElement);
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+      items[next]?.focus();
+      return;
+    }
+  }
+  // CSS 排序不改变 Glimmer 管理的 DOM，Tab 顺序同步为点赞、回复、收藏、更多。
+  if (event.key === 'Tab') {
+    const index = primary.indexOf(document.activeElement), next = index + (event.shiftKey ? -1 : 1);
+    if (index >= 0 && next >= 0 && next < primary.length) { event.preventDefault(); primary[next].focus(); }
+  }
+}
+function syncPostMenus() {
+  const actionsList = [...document.querySelectorAll('nav.post-controls .actions')];
+  const isPrivate = document.body.classList.contains('archetype-private_message');
+  if (!isPrivate) for (const actions of actionsList) {
+    actions.classList.add('linuxdo-ai-post-actions');
+    const nativeMore = actions.querySelector(':scope > .show-more-actions');
+    // 普通话题先在隐藏状态下让 Discourse 生成原生收藏等控件，不挪动节点或复制事件。
+    // 私信的原生展开会读取已读名单，因此仍不接管私信操作栏。
+    if (nativeMore && !revealedPostMenus.has(nativeMore)) { revealedPostMenus.add(nativeMore); nativeMore.click(); }
+  }
+  placePostExports();
+  if (isPrivate) { closePostMenu(); return; }
+  for (const actions of actionsList) {
+    let menu = postMenus.get(actions);
+    if (!menu) {
+      const id = `linuxdo-ai-post-menu-${++postMenuSequence}`;
+      const trigger = element('button', { type: 'button', class: 'btn no-text btn-icon btn-flat linuxdo-ai-post-more', title: '更多', 'aria-label': '更多帖子操作', 'aria-expanded': 'false', 'aria-haspopup': 'menu', 'aria-controls': id, 'data-ai-post-kind': 'more' }, [uiIcon('more')]);
+      const surface = element('div', { id, class: 'linuxdo-ai-post-menu-surface', role: 'menu', 'aria-label': '更多帖子操作', 'aria-hidden': 'true', 'data-ai-post-kind': 'surface' });
+      menu = { actions, trigger, surface, items: [] }; postMenus.set(actions, menu);
+      trigger.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); togglePostMenu(menu); });
+      actions.addEventListener('keydown', event => postMenuKeydown(event, menu));
+      actions.addEventListener('click', event => {
+        if (activePostMenu === menu && menu.items.some(item => item.contains(event.target))) closePostMenu();
+      });
+    }
+    if (!menu.trigger.isConnected) actions.append(menu.trigger);
+    if (!menu.surface.isConnected) actions.append(menu.surface);
+    menu.items = [];
+    for (const node of actions.children) {
+      if (node === menu.trigger || node === menu.surface) continue;
+      const kind = node.matches('.post-action-menu__like, .discourse-reactions-actions-button-shim') ? 'like'
+        : node.matches('.post-action-menu__reply') ? 'reply' : node.matches('.post-action-menu__bookmark') ? 'bookmark'
+        : node.matches('.show-more-actions') ? 'native-more' : 'secondary';
+      node.dataset.aiPostKind = kind;
+      if (kind !== 'secondary' || node.hidden) continue;
+      const labels = { 'copy-link': '复制链接', share: '分享', flag: '举报', edit: '编辑', delete: '删除', admin: '管理', read: '已读', 'add-translation': '翻译' };
+      const key = Object.keys(labels).find(name => node.classList.contains(`post-action-menu__${name}`));
+      node.dataset.aiPostLabel = node.classList.contains('linuxdo-ai-post-export') ? '导出图片' : labels[key] || node.getAttribute('aria-label') || node.title || node.textContent.trim();
+      node.style.setProperty('--ai-post-menu-row', menu.items.length);
+      if (!node.id) node.id = `${menu.surface.id}-item-${++postMenuSequence}`;
+      node.setAttribute('role', 'menuitem'); node.inert = activePostMenu !== menu;
+      menu.items.push(node);
+    }
+    menu.surface.setAttribute('aria-owns', menu.items.map(item => item.id).join(' '));
+    if (activePostMenu === menu) positionPostMenu(menu);
+  }
+  if (activePostMenu && !activePostMenu.trigger.isConnected) closePostMenu();
+}
+document.addEventListener('pointerdown', event => {
+  if (activePostMenu && !activePostMenu.actions.contains(event.target)) closePostMenu();
+});
+window.addEventListener('resize', () => closePostMenu(), { passive: true });
+// 导出排在“更多”的复制链接之后；Discourse 重绘操作栏后补回，保持位置且不重复。
 function placePostExports() {
   for (const actions of document.querySelectorAll('nav.post-controls .actions')) {
     const anchor = actions.querySelector(':scope > .post-action-menu__copy-link, :scope > .post-action-menu__share');
@@ -1594,7 +1726,7 @@ function placePostExports() {
     placed.forEach(node => node.remove());
     if (!anchor) continue;
     anchor.after(element('button', { type: 'button', class: 'btn no-text btn-icon btn-flat linuxdo-ai-post-export', title: '导出图片', 'aria-label': '把这一楼导出为图片',
-      onClick: event => { event.preventDefault(); event.stopPropagation(); exportPost(event.currentTarget); } }, [uiIcon('image')]));
+      onClick: event => { event.preventDefault(); event.stopPropagation(); closePostMenu(); exportPost(event.currentTarget); } }, [uiIcon('image')]));
   }
 }
 function exportPost(button) {
@@ -1608,6 +1740,7 @@ function exportPost(button) {
 function reconcile() {
   const id = topicIdFromUrl(location.href);
   if (id !== state.topicId) {
+    closePostMenu();
     state.task?.controller.abort(); cancelProbe(); testResult.hidden = true; state.task = null; state.context = null; state.topicId = id;
     if (state.view === 'export') setView('chat');
     questionInput.value = ''; resizeComposer(); closePopover(); nodes.clear();
@@ -1619,7 +1752,7 @@ function reconcile() {
   }
   if (!id) { launcher.hidden = true; timelineButton?.remove(); timelineButton = null; return; }
   if (!host.isConnected) document.body.append(host);
-  expandPostMenus(); placePostExports();
+  syncPostMenus();
   const heading = document.querySelector('#topic-title h1[data-topic-id]');
   if (heading?.dataset.topicId === id) {
     const text = heading.querySelector('.fancy-title')?.textContent.trim() || heading.textContent.trim();
