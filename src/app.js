@@ -436,8 +436,9 @@ function openPanel(instant = false) {
   applyLayout(); refreshControls(); resizeComposer(); scrollLatest(); panel.focus();
 }
 // 点击关闭时淡出 150ms；Esc、键盘操作和减弱动态效果时立即隐藏。
+// 关闭只隐藏面板，读取和生成在后台继续，重新打开即可看到进度；需要中断时用停止按钮。
 function closePanel({ instant = false } = {}) {
-  state.task?.controller.abort(); cancelProbe(); state.open = false; keyInput.value = '';
+  cancelProbe(); state.open = false; keyInput.value = '';
   closePopover();
   const finish = () => {
     clearTimeout(closeTimer); panel.removeAttribute('data-closing');

@@ -235,6 +235,18 @@ test('生成中切换话题会取消旧请求，历史和上下文不串帖', as
   assert.match(await page.locator('#linuxdo-ai-root .message-note').allTextContents().then(v => v.join('')), /停止/);
 });
 
+test('生成中关闭面板不会中断，重新打开可看到完整回答', async t => {
+  const page = await setup(t); await configure(page); await page.evaluate(() => fixture.setMode('slow'));
+  await summary(page).click(); await page.locator('#linuxdo-ai-root .assistant .body').filter({ hasText: '主要内容' }).waitFor();
+  await page.getByRole('button', { name: '关闭 AI 面板', exact: true }).click();
+  await page.locator('#linuxdo-ai-root .panel').waitFor({ state: 'hidden' });
+  await page.locator('#linuxdo-ai-root .panel[aria-busy="false"]').waitFor({ state: 'attached' });
+  assert.equal(await page.evaluate(() => fixture.requests[0].aborted), false);
+  await page.locator('#linuxdo-ai-topic-button').click(); await done(page);
+  assert.equal(await page.evaluate(() => fixture.requests.length), 1);
+  assert.doesNotMatch(await page.locator('#linuxdo-ai-root .message-note').allTextContents().then(v => v.join('')), /停止/);
+});
+
 test('停止、重试、新对话和历史切换不会重复问题', async t => {
   const page = await setup(t); await configure(page); await page.evaluate(() => fixture.setMode('slow'));
   await summary(page).click(); await page.locator('#linuxdo-ai-root .assistant .body').filter({ hasText: '主要内容' }).waitFor();
