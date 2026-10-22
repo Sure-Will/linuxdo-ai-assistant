@@ -333,7 +333,7 @@ test('帖子操作栏只显示点赞、回复、收藏、更多，原生状态�
   await page.evaluate(() => fixture.addPost());
   await page.locator('main .linuxdo-ai-post-more').nth(3).waitFor();
   assert.deepEqual(await visibleOrder(menus.nth(3)), ['点赞', '回复', '收藏', '更多帖子操作']);
-  assert.equal(await page.locator('main [data-ai-post-open]').count(), 0, '新楼层不展开更多菜单');
+  assert.equal(await page.locator('main [data-ai-post-expanded]').count(), 0, '新楼层不自动展开');
   assert.equal(await page.evaluate(() => fixture.menuClicks), 4, '每楼仅初始化一次原生控件');
   assert.equal(await page.evaluate(() => fixture.calls.length + fixture.requests.length), 0, '整理操作栏不读取帖子也不请求模型');
   await page.screenshot({ path: path.join(resultsDir, 'post-actions-light.png') });
@@ -346,7 +346,7 @@ test('帖子操作栏只显示点赞、回复、收藏、更多，原生状态�
   assert.equal(await page.evaluate(() => fixture.menuClicks), 4, '私信不自动读取已读名单');
 });
 
-test('帖子更多菜单单独打开，操作、外部点击和 Esc 收起，键盘顺序与视觉顺序一致', async t => {
+test('帖子更多在原位横向展开原生图标，保持展开且不影响其他楼层', async t => {
   const page = await setup(t, undefined, { settings: false });
   await page.getByRole('button', { name: '关闭 AI 面板', exact: true }).click();
   const actions = page.locator('main nav.post-controls .actions'), more = page.locator('main .linuxdo-ai-post-more');
@@ -357,54 +357,81 @@ test('帖子更多菜单单独打开，操作、外部点击和 Esc 收起，键
     assert.equal(await page.evaluate(() => document.activeElement.getAttribute('aria-label')), label);
   }
   await page.keyboard.press('Enter');
-  assert.equal(await more.first().getAttribute('aria-expanded'), 'true');
-  const menuLabels = await actions.first().getByRole('menuitem').evaluateAll(items => items.map(item => item.dataset.aiPostLabel));
-  assert.deepEqual(menuLabels, ['复制链接', '导出图片', '举报', '编辑', '删除']);
-  await page.keyboard.press('ArrowDown');
-  assert.equal(await page.evaluate(() => document.activeElement.dataset.aiPostLabel), '导出图片');
-  await page.keyboard.press('Escape');
-  assert.equal(await more.first().getAttribute('aria-expanded'), 'false');
-  assert.equal(await more.first().evaluate(node => node === document.activeElement), true);
-  await more.first().click(); await more.nth(2).click();
-  assert.equal(await page.locator('main [data-ai-post-open]').count(), 1);
-  assert.equal(await more.first().getAttribute('aria-expanded'), 'false');
+  const copy = actions.first().locator('.post-action-menu__copy-link');
+  await copy.waitFor();
+  const baseline = await actions.first().locator('.post-action-menu__reply').boundingBox();
+  const copyBox = await copy.boundingBox();
+  assert.ok(Math.abs(copyBox.y + copyBox.height / 2 - baseline.y - baseline.height / 2) < 1, '更多应在操作栏原位置横向展开，不弹出下拉浮层');
+  assert.equal(await more.first().isVisible(), false, '按原站行为，展开后省去更多按钮');
+  assert.equal(await page.locator('.linuxdo-ai-post-menu-surface').count(), 0);
+  const rowLabels = await actions.first().locator('button:visible').evaluateAll(nodes => nodes.sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left).map(n => n.getAttribute('aria-label')));
+  assert.deepEqual(rowLabels, ['点赞', '回复', '收藏', '复制链接', '把这一楼导出为图片', '举报', '编辑', '删除']);
   await page.locator('#topic-title').click();
-  assert.equal(await page.locator('main [data-ai-post-open]').count(), 0);
-  await more.first().click();
-  await page.screenshot({ path: path.join(resultsDir, 'post-more-light.png') });
-  await actions.first().getByRole('menuitem', { name: '复制链接', exact: true }).click();
-  assert.equal(await more.first().getAttribute('aria-expanded'), 'false');
-  await page.waitForFunction(() => fixture.actionAnchor);
-  assert.ok(await page.evaluate(() => fixture.actionAnchor.width > 0 && fixture.actionAnchor.height > 0), '收起后仍保留原生反馈浮层的锚点尺寸');
+  assert.equal(await copy.isVisible(), true, '点击外部保持展开');
+  await copy.click();
   assert.deepEqual(await page.evaluate(() => fixture.actionClicks), ['copy-link']);
+  assert.equal(await copy.isVisible(), true, '使用原生操作后保持展开');
+  await page.screenshot({ path: path.join(resultsDir, 'post-expanded-light.png') });
   await page.getByRole('button', { name: '切换明暗', exact: true }).click();
-  await more.first().click();
-  await page.screenshot({ path: path.join(resultsDir, 'post-more-dark.png') });
+  await page.screenshot({ path: path.join(resultsDir, 'post-expanded-dark.png') });
+  await actions.first().getByRole('button', { name: '点赞', exact: true }).focus();
+  for (const label of rowLabels.slice(1)) {
+    await page.keyboard.press('Tab');
+    assert.equal(await page.evaluate(() => document.activeElement.getAttribute('aria-label')), label);
+  }
+  await page.keyboard.press('Tab');
+  assert.equal(await actions.first().evaluate(n => n.contains(document.activeElement)), false, '展开后 Tab 能离开当前操作栏');
   await page.evaluate(() => fixture.rerenderMenu(0));
-  await actions.first().getByRole('menuitem', { name: '举报', exact: true }).waitFor();
-  assert.equal(await more.count(), 3, '原生重绘不重复插入更多入口');
-  await actions.first().getByRole('menuitem', { name: '举报', exact: true }).click();
-  assert.equal(await page.locator('main [data-ai-post-open]').count(), 0);
+  await actions.first().locator('.post-action-menu__flag').waitFor();
+  assert.equal(await more.first().isVisible(), false, '重绘不重新收起');
+  await more.nth(1).click();
+  assert.equal(await actions.first().locator('.post-action-menu__flag').isVisible(), true, '另一楼展开不影响本楼');
+  assert.equal(await actions.nth(1).locator('.post-action-menu__flag').isVisible(), true);
+  await page.evaluate(() => fixture.addPost());
+  await more.nth(3).waitFor();
+  assert.equal(await actions.nth(3).locator('.post-action-menu__flag').isVisible(), false, '新楼层仍默认收起');
   assert.equal(await page.evaluate(() => fixture.calls.length + fixture.requests.length), 0);
 });
 
-test('帖子更多菜单适配窄屏和底部位置，无权限的按钮不补造', async t => {
-  const page = await setup(t, { width: 390, height: 600 }, { settings: false });
+test('回复图标与原生纯图标按钮同宽居中，图文按钮保留文字间距作为对照', async t => {
+  const page = await setup(t, undefined, { settings: false });
+  await page.getByRole('button', { name: '关闭 AI 面板', exact: true }).click();
+  const actions = page.locator('main nav.post-controls .actions').first();
+  await actions.locator('.linuxdo-ai-post-more').waitFor();
+  const measured = await actions.evaluate(row => {
+    const measure = node => {
+      const r = node.getBoundingClientRect(), i = node.querySelector('svg').getBoundingClientRect();
+      return { width: r.width, offset: i.x + i.width / 2 - r.x - r.width / 2 };
+    };
+    return { reply: measure(row.querySelector('.post-action-menu__reply')), bookmark: measure(row.querySelector('.post-action-menu__bookmark')) };
+  });
+  assert.ok(Math.abs(measured.reply.width - measured.bookmark.width) < 1, `回复与收藏按钮应同宽，实际 ${JSON.stringify(measured)}`);
+  assert.ok(Math.abs(measured.reply.offset) < 0.5, '隐藏文字后回复图标应居中');
+  assert.equal(await actions.locator('.post-action-menu__reply .d-button-label').isVisible(), false);
+  const controlMargin = await page.evaluate(() => {
+    const control = document.querySelector('.post-action-menu__reply').cloneNode(true);
+    control.removeAttribute('data-ai-post-kind'); document.body.append(control);
+    const margin = parseFloat(getComputedStyle(control.querySelector('svg')).marginRight); control.remove(); return margin;
+  });
+  assert.ok(controlMargin > 0, '对照样式确实包含图文按钮间距，回归测试能检出它');
+  await fs.writeFile(path.join(resultsDir, 'reply-icon-geometry.json'), JSON.stringify(measured, null, 2));
+});
+
+test('帖子操作栏在窄屏原位换行，无权限的按钮不补造', async t => {
+  const page = await setup(t, { width: 320, height: 600 }, { settings: false });
   await page.getByRole('button', { name: '关闭 AI 面板', exact: true }).click();
   const actions = page.locator('main nav.post-controls .actions').first();
   await actions.locator('.linuxdo-ai-post-more').click();
-  const surface = actions.locator('.linuxdo-ai-post-menu-surface');
-  const rect = await surface.boundingBox();
-  assert.ok(rect.x >= 8 && rect.x + rect.width <= 382 && rect.y >= 8 && rect.y + rect.height <= 592, '更多菜单完整位于视口内');
-  await page.screenshot({ path: path.join(resultsDir, 'post-more-narrow.png') });
-  assert.equal(await surface.isVisible(), true, '滚动到更多按钮后菜单不会被延迟的滚动事件关掉');
-  await page.keyboard.press('Escape');
+  await actions.locator('.post-action-menu__flag').waitFor();
+  const boxes = await actions.locator('button:visible').evaluateAll(buttons => buttons.map(b => b.getBoundingClientRect().toJSON()));
+  assert.ok(boxes.every(r => r.x >= 0 && r.right <= 320), '展开后的原生按钮完整位于窄屏内');
+  await page.screenshot({ path: path.join(resultsDir, 'post-expanded-narrow.png') });
   await actions.locator('.post-action-menu__bookmark').evaluate(node => node.remove());
   await page.evaluate(() => new Promise(requestAnimationFrame));
   assert.equal(await actions.locator('.post-action-menu__bookmark').count(), 0, '原生不允许收藏时不创建替代按钮');
-  await actions.locator('.linuxdo-ai-post-more').click();
   await page.getByRole('button', { name: '话题二', exact: true }).click();
-  assert.equal(await page.locator('main [data-ai-post-open]').count(), 0, '切换话题关闭菜单');
+  await actions.locator('.linuxdo-ai-post-more').waitFor();
+  assert.equal(await actions.locator('.post-action-menu__flag').isVisible(), false, '切换话题默认收起');
 });
 
 test('每楼更多菜单可导出图片，重绘后补回，导出时图片转进图里且不执行帖子脚本', async t => {
@@ -418,7 +445,7 @@ test('每楼更多菜单可导出图片，重绘后补回，导出时图片转�
   await page.getByRole('button', { name: '关闭 AI 面板', exact: true }).click();
   await page.locator('main .linuxdo-ai-post-more').nth(1).click();
   await exports.nth(1).click();
-  assert.equal(await page.locator('main [data-ai-post-open]').count(), 0, '选择导出图片后自动收起更多菜单');
+  assert.equal(await page.locator('main .post-action-menu__copy-link').nth(1).isVisible(), true, '导出后操作栏仍保持原位展开');
   assert.equal(await page.locator('#linuxdo-ai-root .brand strong').innerText(), '导出图片');
   const canvas = page.locator('#linuxdo-ai-root .export-preview[aria-busy="false"] canvas');
   await canvas.waitFor();

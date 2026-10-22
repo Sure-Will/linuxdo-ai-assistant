@@ -122,9 +122,9 @@
   const actionClicks = [], menuStates = new WeakMap();
   const menuIcons = { like: 'M12 20 3 11a5 5 0 0 1 9-6 5 5 0 0 1 9 6Z', 'copy-link': 'm9 15 6-6m-7 3-3 3a4 4 0 0 0 6 6l3-3m-1-6 3-3a4 4 0 0 0-6-6L7 6', bookmark: 'M6 3h12v18l-6-4-6 4Z', flag: 'M5 22V3h14l-3 4 3 4H5', edit: 'm4 17 12-12 3 3L7 20H4Z', delete: 'M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15', reply: 'm9 5-6 6 6 6v-5c6 0 9 2 12 6-1-8-5-11-12-11Z', 'show-more': 'M5 12h.01M12 12h.01M19 12h.01' };
   function menuButton(name, label, state) {
-    const node = document.createElement('button'); node.type = 'button'; node.className = `btn btn-flat post-action-menu__${name}`;
+    const node = document.createElement('button'); node.type = 'button'; node.className = `btn btn-flat post-action-menu__${name} ${name === 'reply' ? 'reply create fade-out btn-icon-text' : 'btn-icon no-text'}`;
     node.setAttribute('aria-label', label); node.title = label;
-    node.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${menuIcons[name]}"></path></svg>`;
+    node.innerHTML = `<svg class="fa d-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="${menuIcons[name]}"></path></svg>`;
     if (name === 'reply') { const text = document.createElement('span'); text.className = 'd-button-label'; text.textContent = label; node.append(text); }
     if (name === 'like' || name === 'bookmark') {
       node.setAttribute('aria-pressed', String(state[name])); node.classList.toggle('active', state[name]);
