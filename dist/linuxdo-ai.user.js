@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linux.do AI 阅读助手
 // @namespace    sure.linuxdo.ai
-// @version      0.1.12
+// @version      0.1.13
 // @description  自选模型，流式总结、连续追问、上下文范围和本地历史。适用于 Chrome 标签页与 PWA。
 // @author       Sure
 // @homepageURL  https://github.com/Sure-Will/linuxdo-ai-assistant
@@ -861,8 +861,10 @@ const pageStyle = element('style', { text: `
   .linuxdo-ai-post-actions > [data-ai-post-kind="reply"] .d-button-label { display: none; }
   nav.post-controls .linuxdo-ai-post-actions > [data-ai-post-kind="reply"] .d-icon { margin-inline: 0; }
   .linuxdo-ai-post-actions > [data-ai-post-kind="bookmark"] { order: 2; }
-  .linuxdo-ai-post-actions > [data-ai-post-kind="secondary"] { order: 3; }
-  .linuxdo-ai-post-actions > [data-ai-post-kind="more"] { order: 4; }
+  .linuxdo-ai-post-actions > [data-ai-post-kind="export"] { order: 3; }
+  .linuxdo-ai-post-actions > [data-ai-post-kind="boost"] { order: 4; }
+  .linuxdo-ai-post-actions > [data-ai-post-kind="secondary"] { order: 5; }
+  .linuxdo-ai-post-actions > [data-ai-post-kind="more"] { order: 6; }
   .linuxdo-ai-post-actions:not([data-ai-post-expanded]) > [data-ai-post-kind="secondary"], .linuxdo-ai-post-actions > [hidden] { display: none !important; }
 ` });
 document.head.append(pageStyle);
@@ -1641,11 +1643,12 @@ function syncPostMenus() {
       if (node === trigger) continue;
       node.dataset.aiPostKind = node.matches('.post-action-menu__like, .discourse-reactions-actions-button-shim') ? 'like'
         : node.matches('.post-action-menu__reply') ? 'reply' : node.matches('.post-action-menu__bookmark') ? 'bookmark'
+        : node.matches('.linuxdo-ai-post-export') ? 'export' : node.matches('.post-action-menu__boost') ? 'boost'
         : node.matches('.show-more-actions') ? 'native-more' : 'secondary';
     }
   }
 }
-// 原位展开后，导出图标紧跟复制链接；重绘后补回且不重复。
+// 导出节点仍插在复制链接后，不移动原生控件；普通话题由 CSS 排到收藏后，私信沿用插入位置。
 function placePostExports() {
   for (const actions of document.querySelectorAll('nav.post-controls .actions')) {
     const anchor = actions.querySelector(':scope > .post-action-menu__copy-link, :scope > .post-action-menu__share');
