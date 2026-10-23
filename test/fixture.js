@@ -63,6 +63,7 @@
     if (typeof path !== 'string' || !path.startsWith('/t/')) return nativeFetch(path, options);
     if (options.signal?.aborted) throw new DOMException('stopped', 'AbortError');
     calls.push(path);
+    if (mode === 'slow-forum') await new Promise(resolve => setTimeout(resolve, 150));
     const url = new URL(path, location.href);
     const topic = url.pathname.split('/')[2].replace('.json', '');
     if (mode === 'forum-error') return new Response('<html>verification</html>', { status: 403 });

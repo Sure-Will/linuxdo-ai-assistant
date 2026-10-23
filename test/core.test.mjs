@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import { topicIdFromUrl, normalizeEndpoint, validateConfig, wantedPostIds, collectTopic, EventStreamParser, buildMessages, streamChat } from '../src/core.js';
+import { topicIdFromUrl, normalizeEndpoint, validateConfig, wantedPostIds, loadTopic, scopeContext, EventStreamParser, buildMessages, streamChat } from '../src/core.js';
 
 test('识别 slug、纯数字话题地址与楼层地址', () => {
   for (const url of ['/t/topic/123/45', '/t/123/45', '/t/123', '/t/中文/123?x=1']) assert.equal(topicIdFromUrl(url), '123');
@@ -18,29 +18,56 @@ test('上下文默认计数包含首帖，去重后再截取', () => {
   assert.deepEqual(wantedPostIds([1, 1, 2, 3, 4, 5, 6], '5'), [1, 2, 3, 4, 5]);
   assert.deepEqual(wantedPostIds([1, 2], 'first'), [1]);
   assert.throws(() => wantedPostIds([], 'all'));
+  for (const scope of ['10', '20']) assert.throws(() => wantedPostIds([1, 2], scope), /无效/);
 });
 const post = id => ({ id, post_number: id, username: `u${id}`, cooked: `内容 ${id}` });
-test('长帖按 20 个补齐，排除接口夹带的其他帖子并保持楼层顺序', async () => {
+test('长帖按 20 个补齐，排除接口夹带的其他帖子，三档范围从同一份截取', async () => {
   const calls = [], progress = [];
-  const context = await collectTopic({ topicId: '77', scope: 'all', toText: x => x, onProgress: (...v) => progress.push(v), getJson: async path => {
+  const data = await loadTopic({ topicId: '77', toText: x => x, onProgress: value => progress.push([value.posts.size, value.ids.length, value.done]), getJson: async path => {
     calls.push(path);
     if (path === '/t/77.json') return { id: 77, title: '长帖', post_stream: { stream: Array.from({ length: 47 }, (_, i) => i + 1), posts: [post(3), post(2), post(1)] } };
     const ids = new URL(path, 'https://linux.do').searchParams.getAll('post_ids[]').map(Number);
     assert.ok(ids.length <= 20);
     return { post_stream: { posts: [...ids.reverse().map(post), post(999)] } };
   } });
-  assert.equal(context.count, 47); assert.equal(calls.length, 4); assert.match(context.text, /^#1 @u1/);
-  assert.ok(context.text.indexOf('#20 @') < context.text.indexOf('#21 @')); assert.ok(!context.text.includes('#999'));
-  assert.deepEqual(progress.at(-1), [47, 47]);
+  assert.equal(calls.length, 4); assert.equal(data.done, true); assert.equal(data.overflow, false);
+  assert.deepEqual(progress[0], [3, 47, false], '第一次请求后即回传已有楼层');
+  assert.deepEqual(progress.at(-1), [47, 47, true]);
+  const all = scopeContext(data, 'all');
+  assert.equal(all.count, 47); assert.equal(all.total, 47); assert.match(all.text, /^#1 @u1/);
+  assert.ok(all.text.indexOf('#20 @') < all.text.indexOf('#21 @')); assert.ok(!all.text.includes('#999'));
+  assert.equal(scopeContext(data, '5').text, [1, 2, 3, 4, 5].map(id => `#${id} @u${id}\n内容 ${id}`).join('\n\n'));
+  assert.equal(scopeContext(data, 'first').count, 1);
+});
+test('读取中所需楼层未到时返回 null，前几帖已到即可截取', () => {
+  const data = { topicId: '5', title: 't', ids: [1, 2, 3, 4, 5, 6], posts: new Map([[1, { number: 1, text: '#1' }]]), done: false, overflow: false };
+  assert.equal(scopeContext(data, 'first').count, 1);
+  assert.equal(scopeContext(data, '5'), null);
+  assert.equal(scopeContext(data, 'all'), null);
 });
 test('缺少楼层时不产生可发送的上下文', async () => {
-  await assert.rejects(collectTopic({ topicId: '9', scope: '5', toText: x => x, getJson: async path => path === '/t/9.json'
-    ? { id: 9, post_stream: { stream: [1, 2], posts: [post(1)] } } : { post_stream: { posts: [] } } }), /只读到 1\/2/);
+  const data = await loadTopic({ topicId: '9', toText: x => x, getJson: async path => path === '/t/9.json'
+    ? { id: 9, post_stream: { stream: [1, 2], posts: [post(1)] } } : { post_stream: { posts: [] } } });
+  assert.equal(scopeContext(data, 'first').count, 1);
+  assert.throws(() => scopeContext(data, '5'), /只读到 1\/2/);
+});
+test('累计超过 12 万字后停止读取，首帖仍可用，全部帖子报超长', async () => {
+  const calls = [], big = id => ({ ...post(id), cooked: 'x'.repeat(5000) });
+  const data = await loadTopic({ topicId: '8', toText: x => x, getJson: async path => {
+    calls.push(path);
+    if (path === '/t/8.json') return { id: 8, post_stream: { stream: Array.from({ length: 200 }, (_, i) => i + 1), posts: [big(1)] } };
+    return { post_stream: { posts: new URL(path, 'https://linux.do').searchParams.getAll('post_ids[]').map(Number).map(big) } };
+  } });
+  assert.equal(data.overflow, true); assert.equal(data.done, true);
+  assert.equal(calls.length, 3, '读到超过上限的那一批后不再请求');
+  assert.ok(data.posts.size < 200);
+  assert.equal(scopeContext(data, 'first').count, 1); assert.equal(scopeContext(data, '5').count, 5);
+  assert.throws(() => scopeContext(data, 'all'), /12 万字符/);
 });
 test('取消上下文加载后不继续请求下一批', async () => {
   const controller = new AbortController(); let count = 0;
-  await assert.rejects(collectTopic({ topicId: '9', scope: 'all', signal: controller.signal, toText: x => x, getJson: async () => {
-    count++; controller.abort(); return { id: 9, post_stream: { stream: [1], posts: [post(1)] } };
+  await assert.rejects(loadTopic({ topicId: '9', signal: controller.signal, toText: x => x, getJson: async () => {
+    count++; controller.abort(); return { id: 9, post_stream: { stream: [1, 2], posts: [post(1)] } };
   } }), { name: 'AbortError' }); assert.equal(count, 1);
 });
 test('SSE 处理 CRLF 拆包、注释、多行 data 和末尾无空行', () => {

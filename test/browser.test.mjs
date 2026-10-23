@@ -29,16 +29,20 @@ async function setup(t, viewport = { width: 1440, height: 960 }, { settings = tr
   await page.locator('#linuxdo-ai-topic-button').waitFor({ state: 'attached' });
   if (await page.locator('#linuxdo-ai-topic-button').isVisible()) await page.locator('#linuxdo-ai-topic-button').click();
   else await page.locator('#linuxdo-ai-root .launcher').click();
+  // 点 AI 按钮会预读全部帖子；等读完再清空记录，各用例只统计自己触发的论坛请求。
+  await readAll(page);
+  await page.evaluate(() => { fixture.calls.length = 0; });
   if (settings) await openSettings(page);
   return page;
 }
+async function readAll(page) { await page.locator('#linuxdo-ai-root .context-count[data-state="ready"]').waitFor({ state: 'attached' }); }
 async function openSettings(page) {
   await page.getByRole('button', { name: '更多操作', exact: true }).click();
   await page.getByRole('button', { name: '模型设置', exact: true }).click();
 }
 async function chooseScope(page, value) {
   await page.getByRole('button', { name: '选择阅读范围', exact: true }).click();
-  await page.getByRole('menuitemradio', { name: { first: '仅首帖', '5': '前 5 帖', '10': '前 10 帖', '20': '前 20 帖', all: '全部帖子' }[value], exact: true }).click();
+  await page.getByRole('menuitemradio', { name: { first: '仅首帖', '5': '前 5 帖', all: '全部帖子' }[value], exact: true }).click();
 }
 async function refreshContext(page) {
   await page.getByRole('button', { name: '选择阅读范围', exact: true }).click();
@@ -55,18 +59,30 @@ async function done(page) { await page.locator('#linuxdo-ai-root .panel[aria-bus
 const summary = page => page.getByRole('button', { name: '总结这个话题', exact: true });
 const input = page => page.getByRole('textbox', { name: '向 AI 提问', exact: true });
 
-test('打开、重开、刷新及切换话题均不自动读取或总结，只有显式点击才请求', async t => {
+test('点 AI 按钮预读全部帖子但不调用模型，重开不重复读取，从导出图片打开不读取', async t => {
   const page = await setup(t, { width: 1440, height: 756 }, { settings: false });
   assert.equal(await page.getByLabel('供应商', { exact: true }).isVisible(), false);
-  assert.equal(await page.evaluate(() => fixture.requests.length + fixture.calls.length), 0);
   await openSettings(page); await configure(page);
   await page.getByRole('button', { name: '关闭 AI 面板', exact: true }).click();
-  await page.locator('#linuxdo-ai-topic-button').click();
   await page.getByRole('button', { name: '话题二', exact: true }).click();
-  await page.reload(); await page.locator('#linuxdo-ai-topic-button').click();
-  assert.equal(await page.evaluate(() => fixture.requests.length + fixture.calls.length), 0);
+  await page.locator('main .linuxdo-ai-post-export').first().click();
+  await page.locator('#linuxdo-ai-root .export-preview[aria-busy="false"] canvas').waitFor();
+  assert.deepEqual(await page.evaluate(() => fixture.calls), ['/posts/1.json'], '从导出图片打开面板只读这一楼');
+  await page.getByRole('button', { name: '关闭 AI 面板', exact: true }).click();
+  await page.evaluate(() => { fixture.calls.length = 0; });
+  await page.locator('#linuxdo-ai-topic-button').click(); await readAll(page);
+  const calls = await page.evaluate(() => fixture.calls);
+  assert.equal(calls.length, 4); assert.ok(calls.every(path => path.startsWith('/t/1002')), '读取当前话题的全部帖子');
+  assert.equal(await page.getByRole('status').isVisible(), false, '后台读取不显示状态横幅');
+  await page.getByRole('button', { name: '关闭 AI 面板', exact: true }).click();
+  await page.locator('#linuxdo-ai-topic-button').click();
+  assert.equal(await page.evaluate(() => fixture.calls.length), 4, '重开面板不重复读取');
+  await page.reload(); await page.locator('#linuxdo-ai-topic-button').click(); await readAll(page);
+  assert.equal(await page.evaluate(() => fixture.calls.length), 4);
+  assert.equal(await page.evaluate(() => fixture.requests.length), 0, '读取帖子不调用模型');
   await summary(page).click(); await done(page);
   assert.equal(await page.evaluate(() => fixture.requests.length), 1);
+  assert.equal(await page.evaluate(() => fixture.calls.length), 4, '发送直接使用预读结果');
   assert.equal(await page.getByRole('status').isVisible(), false, '完成后不保留状态横幅');
   const reading = await page.locator('#linuxdo-ai-root .conversation').boundingBox();
   const frame = await page.locator('#linuxdo-ai-root .panel').boundingBox();
@@ -92,12 +108,22 @@ test('更多菜单与范围浮层可用，Esc 和点击外部只关闭浮层', a
   await page.getByRole('button', { name: '选择阅读范围', exact: true }).click();
   assert.equal(await page.getByRole('menuitemradio', { name: '仅首帖', exact: true }).isVisible(), true);
   assert.equal(await page.getByLabel('上下文范围', { exact: true }).count(), 0, '范围点击后直接列出选项');
+  assert.deepEqual(await page.getByRole('menu', { name: '阅读范围', exact: true }).getByRole('menuitemradio').allInnerTexts(), ['仅首帖', '前 5 帖', '全部帖子']);
+  assert.equal(await page.locator('#linuxdo-ai-root .context-count').innerText(), '已读 47/47 帖');
+  const edges = await page.locator('#linuxdo-ai-root .scope-popover').evaluate(menu => {
+    const box = selector => menu.querySelector(selector).getBoundingClientRect();
+    return { option: box('.option-item span').left, meta: box('.context-count').left, check: box('.option-item[aria-checked="true"] .ui-icon').right, refresh: box('.refresh-action span').right };
+  });
+  assert.ok(Math.abs(edges.option - edges.meta) <= 1 && Math.abs(edges.check - edges.refresh) <= 1, `底栏与选项左右对齐：${JSON.stringify(edges)}`);
   await page.screenshot({ path: path.join(resultsDir, 'scope-popover.png') });
   await input(page).click();
   assert.equal(await page.locator('#linuxdo-ai-root .scope-popover').isVisible(), false);
   await chooseScope(page, 'all');
   assert.equal(await page.locator('#linuxdo-ai-root .scope-button').innerText(), '全部帖子');
   assert.equal(await page.evaluate(() => fixture.requests.length + fixture.calls.length), 0);
+  await page.evaluate(() => GM_setValue('linuxdo-ai:v1:topic:1002', { version: 1, title: '旧对话', activeId: 'old', sessions: [{ id: 'old', createdAt: 1, scope: '20', messages: [] }] }));
+  await page.getByRole('button', { name: '话题二', exact: true }).click();
+  await page.locator('#linuxdo-ai-root .scope-button', { hasText: '前 5 帖' }).waitFor();
 });
 
 test('右侧 AI 入口与阅读器同尺寸，并与下方两列对齐', async t => {
@@ -200,22 +226,45 @@ test('设置、默认总结、追问与刷新恢复形成完整闭环', async t 
   assert.equal(await page.getByLabel('模型名', { exact: true }).inputValue(), '测试模型');
 });
 
-test('全部范围分批读齐，缺楼层时不发送模型请求', async t => {
+test('全部范围分批读齐，三档发送都不再读取论坛，缺楼层时不发送模型请求', async t => {
   const page = await setup(t); await configure(page);
-  await chooseScope(page, 'all');
+  for (const scope of ['first', '5', 'all']) { await chooseScope(page, scope); await summary(page).click(); await done(page); }
+  const materials = await page.evaluate(() => fixture.requests.map(request => request.payload.messages[1].content));
+  assert.match(materials[0], /1\/47/); assert.match(materials[1], /5\/47/); assert.match(materials[2], /47\/47/); assert.match(materials[2], /测试楼层 47/);
+  assert.equal(await page.evaluate(() => fixture.calls.length), 0, '切换范围后发送直接使用预读结果');
+  await page.evaluate(() => fixture.setMode('missing'));
   await refreshContext(page);
-  await page.getByRole('status').filter({ hasText: '已读取 47/47' }).waitFor();
-  assert.equal(await page.evaluate(() => fixture.requests.length), 0);
+  await page.locator('#linuxdo-ai-root .context-count[data-state="ready"]', { hasText: '已读 44/47 帖' }).waitFor();
+  assert.equal(await page.locator('#linuxdo-ai-root .scope-popover').isVisible(), true, '更新原文后浮层保持打开，底栏显示结果');
   const calls = await page.evaluate(() => fixture.calls);
   assert.equal(calls.length, 4);
   assert.equal(new URL(calls[1], 'https://linux.do').searchParams.getAll('post_ids[]').length, 20);
-  await summary(page).click(); await done(page);
-  assert.match(await page.evaluate(() => fixture.requests[0].payload.messages[1].content), /测试楼层 47/);
-  await page.evaluate(() => fixture.setMode('missing'));
-  await refreshContext(page);
-  await page.getByRole('status').filter({ hasText: '只读到' }).waitFor();
-  await summary(page).click(); await page.getByRole('status').filter({ hasText: '只读到' }).waitFor();
-  assert.equal(await page.evaluate(() => fixture.requests.length), 1);
+  await summary(page).click(); await page.getByRole('status').filter({ hasText: '只读到 44/47' }).waitFor();
+  assert.equal(await page.evaluate(() => fixture.requests.length), 3);
+  assert.equal(await page.evaluate(() => fixture.calls.length), 4, '缺楼层时发送不自动重读');
+  await chooseScope(page, 'first'); await summary(page).click(); await done(page);
+  assert.equal(await page.evaluate(() => fixture.requests.length), 4, '缺的楼层不影响首帖');
+});
+
+test('预读中发送不重复读取：首帖先发，全部等读完；切换话题取消预读', async t => {
+  const page = await setup(t); await configure(page);
+  await page.getByRole('button', { name: '关闭 AI 面板', exact: true }).click();
+  await page.evaluate(() => fixture.setMode('slow-forum'));
+  await page.getByRole('button', { name: '话题二', exact: true }).click();
+  await page.locator('#linuxdo-ai-topic-button').click();
+  await chooseScope(page, 'first'); await summary(page).click();
+  await page.waitForFunction(() => fixture.requests.length === 1);
+  assert.ok(await page.evaluate(() => fixture.calls.length) < 4, '首帖在第一次请求后即可发送');
+  await done(page);
+  await chooseScope(page, 'all'); await summary(page).click(); await done(page);
+  assert.match(await page.evaluate(() => fixture.requests[1].payload.messages[1].content), /47\/47/);
+  assert.equal(await page.evaluate(() => fixture.calls.length), 4, '发送等的是同一次读取，没有重复请求');
+  await page.getByRole('button', { name: '话题一', exact: true }).click();
+  await page.waitForFunction(() => fixture.calls.includes('/t/1001.json'));
+  await page.getByRole('button', { name: '话题二', exact: true }).click();
+  await page.waitForFunction(() => fixture.calls.filter(path => path.startsWith('/t/1002')).length === 8);
+  await readAll(page);
+  assert.ok(await page.evaluate(() => fixture.calls.filter(path => path.startsWith('/t/1001')).length) < 4, '切走后不再读旧话题');
 });
 
 test('生成中切换话题会取消旧请求，历史和上下文不串帖', async t => {
@@ -498,9 +547,13 @@ test('每楼常驻图片按钮可直接导出，重绘后补回，导出时图�
 
 test('论坛验证和模型网络错误不会触发自动重试', async t => {
   const page = await setup(t); await configure(page); await page.evaluate(() => fixture.setMode('forum-error'));
+  await refreshContext(page);
+  await page.locator('#linuxdo-ai-root .context-count[data-state="error"]', { hasText: '读取失败' }).waitFor();
+  assert.match(await page.locator('#linuxdo-ai-root .context-count').getAttribute('title'), /重新登录或验证/);
+  assert.equal(await page.evaluate(() => fixture.calls.length), 1);
   await summary(page).click(); await page.getByRole('status').filter({ hasText: '重新登录或验证' }).waitFor();
   assert.equal(await page.evaluate(() => fixture.requests.length), 0);
-  assert.equal(await page.evaluate(() => fixture.calls.length), 1);
+  assert.equal(await page.evaluate(() => fixture.calls.length), 2, '读取失败后由发送重读一次，不自动重试');
   await page.evaluate(() => fixture.setMode('api-error'));
   await summary(page).click(); await page.locator('#linuxdo-ai-root .message-note').filter({ hasText: '模型连接失败' }).waitFor();
   assert.equal(await page.evaluate(() => fixture.requests.length), 1);

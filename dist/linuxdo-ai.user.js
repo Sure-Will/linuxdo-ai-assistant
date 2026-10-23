@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linux.do AI 阅读助手
 // @namespace    sure.linuxdo.ai
-// @version      0.1.14
+// @version      0.1.15
 // @description  自选模型，流式总结、连续追问、上下文范围和本地历史。适用于 Chrome 标签页与 PWA。
 // @author       Sure
 // @homepageURL  https://github.com/Sure-Will/linuxdo-ai-assistant
@@ -99,7 +99,7 @@ Please report this to https://github.com/markedjs/marked.`,e){let r="<p>An error
 return { marked: g };
 })();
 
-const SCOPES = Object.freeze({ first: 1, '5': 5, '10': 10, '20': 20, all: Infinity });
+const SCOPES = Object.freeze({ first: 1, '5': 5, all: Infinity });
 const SUMMARY_PROMPT = '请简要总结这个话题的主要内容和讨论要点。';
 const MAX_CONTEXT_CHARS = 120_000;
 const EFFORTS = Object.freeze({ default: '默认', none: '关闭', low: '低', high: '高', max: '最高' });
@@ -174,24 +174,28 @@ function checkAbort(signal) {
   if (signal?.aborted) throw abortError();
 }
 
-async function collectTopic({ topicId, scope, getJson, toText, signal, onProgress = () => {} }) {
+// 按楼层顺序逐批读取全部帖子，onProgress 每批回传同一个 data，调用方可以边读边截取前几帖。
+// 累计正文超过上限后停止：超出的部分无法整体发送，继续读只会多发请求。
+async function loadTopic({ topicId, getJson, toText, signal, onProgress = () => {} }) {
   const topic = await getJson(`/t/${topicId}.json`, signal);
   checkAbort(signal);
   if (String(topic.id) !== String(topicId)) throw new Error('话题数据与当前页面不一致，请刷新后重试。');
-  const ids = wantedPostIds(topic.post_stream?.stream, scope);
+  const ids = wantedPostIds(topic.post_stream?.stream, 'all');
   const wanted = new Set(ids);
-  const posts = new Map();
+  const data = { topicId: String(topicId), title: String(topic.title || '当前话题'), ids, posts: new Map(), chars: 0, overflow: false, done: false, fetchedAt: Date.now() };
   const accept = items => {
     for (const post of items || []) {
-      if (wanted.has(post.id) && typeof post.cooked === 'string' && post.cooked.trim() && Number.isInteger(post.post_number)) {
-        posts.set(post.id, post);
+      if (wanted.has(post.id) && !data.posts.has(post.id) && typeof post.cooked === 'string' && post.cooked.trim() && Number.isInteger(post.post_number)) {
+        const text = `#${post.post_number} @${post.username || '匿名'}\n${toText(post.cooked)}`;
+        data.posts.set(post.id, { number: post.post_number, text }); data.chars += text.length + (data.posts.size > 1 ? 2 : 0);
       }
     }
-    onProgress(posts.size, ids.length);
+    data.overflow = data.chars > MAX_CONTEXT_CHARS;
+    onProgress(data);
   };
   accept(topic.post_stream?.posts);
-  const missing = ids.filter(id => !posts.has(id));
-  for (let i = 0; i < missing.length; i += 20) {
+  const missing = ids.filter(id => !data.posts.has(id));
+  for (let i = 0; i < missing.length && !data.overflow; i += 20) {
     checkAbort(signal);
     const query = new URLSearchParams();
     missing.slice(i, i + 20).forEach(id => query.append('post_ids[]', String(id)));
@@ -200,12 +204,22 @@ async function collectTopic({ topicId, scope, getJson, toText, signal, onProgres
     checkAbort(signal);
     accept(result.post_stream?.posts);
   }
-  if (posts.size !== ids.length) throw new Error(`只读到 ${posts.size}/${ids.length} 篇帖子，未发送给 AI。请稍后重试或缩小范围。`);
-  const selected = ids.map(id => posts.get(id)).sort((a, b) => a.post_number - b.post_number);
-  const text = selected.map(post => `#${post.post_number} @${post.username || '匿名'}\n${toText(post.cooked)}`).join('\n\n');
+  data.done = true; onProgress(data);
+  return data;
+}
+
+// 从已读取的帖子中截取所选范围。所需楼层还没读到时返回 null，读完仍缺则报错。
+function scopeContext(data, scope) {
+  const ids = wantedPostIds(data.ids, scope);
+  const posts = ids.map(id => data.posts.get(id)).filter(Boolean);
+  if (posts.length < ids.length) {
+    if (!data.done) return null;
+    if (data.overflow) throw new Error('所选内容超过 12 万字符，请缩小上下文范围后再生成。');
+    throw new Error(`只读到 ${posts.length}/${ids.length} 篇帖子，未发送给 AI。请稍后重试或缩小范围。`);
+  }
+  const text = posts.sort((a, b) => a.number - b.number).map(post => post.text).join('\n\n');
   if (text.length > MAX_CONTEXT_CHARS) throw new Error('所选内容超过 12 万字符，请缩小上下文范围后再生成。');
-  return { topicId: String(topicId), title: String(topic.title || '当前话题'), text, count: selected.length,
-    total: new Set(topic.post_stream.stream).size, scope, fetchedAt: Date.now() };
+  return { topicId: data.topicId, title: data.title, text, count: posts.length, total: data.ids.length, scope, fetchedAt: data.fetchedAt };
 }
 
 function buildMessages(context, history, question) {
@@ -815,7 +829,7 @@ async function renderShareImage(card) {
 }
 
 
-const styles = ":host {\n  --ai-bg: var(--secondary, #fff);\n  --ai-text: var(--primary, #23252a);\n  --ai-muted: var(--primary-high, #5d6470);\n  --ai-line: var(--primary-low, #e2e4e8);\n  --ai-accent: var(--tertiary, #315ca8);\n  --ai-soft: color-mix(in srgb, var(--ai-text) 4%, var(--ai-bg));\n  --ai-raised: color-mix(in srgb, var(--ai-text) 6%, var(--ai-bg));\n  --ai-glass: color-mix(in srgb, var(--ai-raised) 78%, transparent);\n  --ai-hairline: color-mix(in srgb, var(--ai-text) 12%, transparent);\n  --ai-ease: cubic-bezier(.16, 1, .3, 1);\n  font: 14px/1.6 var(--font-family, -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif);\n  color: var(--ai-text);\n  -webkit-font-smoothing: antialiased;\n}\n* { box-sizing: border-box; }\n[hidden] { display: none !important; }\nbutton, input, textarea, select { font: inherit; color: inherit; }\nbutton, select { cursor: pointer; }\nbutton { min-height: 40px; border: 0; border-radius: 8px; padding: 8px 12px; background: var(--ai-soft); touch-action: manipulation; }\nbutton:disabled, select:disabled { cursor: default; opacity: .45; }\nbutton:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid var(--ai-accent); outline-offset: 2px; }\n@media (hover: hover) { button:not(:disabled):hover { background: color-mix(in srgb, var(--ai-text) 10%, var(--ai-bg)); } }\n.primary { background: var(--ai-accent); color: #fff; font-weight: 600; }\n@media (hover: hover) { .primary:not(:disabled):hover { background: color-mix(in srgb, var(--ai-accent) 88%, #000); } }\n.quiet { background: transparent; }\n.icon-button { display: inline-grid; place-items: center; flex: none; width: 40px; height: 40px; padding: 10px; }\n.ui-icon, .linuxdo-ai-icon { flex: none; width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }\n.ui-icon-more { stroke-width: 3.8; }\n.ui-icon-stop { width: 15px; height: 15px; fill: currentColor; stroke-width: 0; }\n.launcher { position: fixed; right: 22px; bottom: 22px; z-index: 1001; width: 40px; height: 40px; padding: 10px; border: 1px solid var(--ai-line); background: var(--ai-bg); display: grid; place-items: center; }\n/* 贴右下角，高度约为可用高度的三分之二；矮窗口至少 420px，且不超出可用高度。 */\n.panel { --ai-room: calc(100dvh - max(12px, env(safe-area-inset-top)) - max(12px, env(safe-area-inset-bottom))); position: fixed; z-index: 1002; right: 12px; bottom: max(12px, env(safe-area-inset-bottom)); height: clamp(min(var(--ai-floor, 420px), var(--ai-room)), var(--ai-room) * var(--ai-ratio, 2 / 3), var(--ai-room)); width: var(--ai-width, 440px); max-width: calc(100vw - 24px); display: flex; flex-direction: column; background: var(--ai-bg); border: 1px solid var(--ai-line); border-radius: 14px; box-shadow: 0 8px 32px #0002; overflow: hidden; }\n.panel:focus-visible { outline: 1px solid var(--ai-line); outline-offset: 0; }\n.resize { position: absolute; z-index: 3; touch-action: none; }\n.resize-top { top: 0; left: 16px; right: 16px; height: 8px; cursor: ns-resize; }\n.resize-left { left: 0; top: 16px; bottom: 16px; width: 8px; cursor: ew-resize; }\n.resize-corner { left: 0; top: 0; width: 16px; height: 16px; cursor: nwse-resize; }\n/* 悬停、聚焦或拖动时才显示的细把手。 */\n.resize-top::after, .resize-left::after { content: ''; position: absolute; border-radius: 2px; background: var(--ai-muted); opacity: 0; }\n.resize-top::after { top: 3px; left: 50%; width: 32px; height: 3px; translate: -50% 0; }\n.resize-left::after { left: 3px; top: 50%; width: 3px; height: 32px; translate: 0 -50%; }\n.resize:hover::after, .resize:focus-visible::after, .panel[data-resizing] .resize::after { opacity: .5; }\n.resize:focus-visible { outline: none; }\n.resize:focus-visible::after { opacity: 1; background: var(--ai-accent); }\n.panel[data-resizing] { transition: none; user-select: none; }\n.head { padding: 8px 12px 4px 16px; flex: none; }\n.head-row, .actions, .composer-actions { display: flex; align-items: center; gap: 4px; }\n.head-row { justify-content: space-between; }\n.brand { display: flex; align-items: center; gap: 4px; }\n.brand strong { font-size: 15px; font-weight: 650; }\n.brand .icon-button { margin-left: -8px; }\n.status { flex: none; margin: 0; padding: 4px 18px 8px; font-size: 12px; color: var(--ai-muted); overflow-wrap: anywhere; }\n.status.error { color: var(--danger, #c74949); }\n.conversation { overflow-y: auto; overscroll-behavior: contain; flex: 1; padding: 10px 16px 8px; min-height: 0; scrollbar-gutter: stable; }\n.message { padding: 4px 0 14px; }\n.message-head { margin-bottom: 6px; font-size: 12px; line-height: 1.5; color: var(--ai-muted); overflow-wrap: anywhere; }\n.message-actions { gap: 0; margin: 2px 0 0 -8px; }\n.message-actions .icon-button { width: 32px; height: 32px; min-height: 32px; padding: 8px; color: var(--ai-muted); }\n.message-actions .ui-icon { width: 15px; height: 15px; }\n.message[data-status=\"generating\"] .message-actions { visibility: hidden; }\n/* 历史回答的操作在悬停时出现；最新一条与触屏始终显示。 */\n@media (hover: hover) {\n  .message-actions { opacity: 0; transition: opacity .15s; }\n  .message:hover .message-actions, .message:last-child .message-actions, .message-actions:focus-within { opacity: 1; }\n}\n.message.user .body { background: var(--ai-soft); border-radius: 8px; padding: 9px 12px; white-space: pre-wrap; }\n.body { overflow-wrap: anywhere; line-height: 1.8; font-size: 14px; }\n.body:empty { display: none; }\n.body > :first-child { margin-top: 0; }\n.body > :last-child { margin-bottom: 0; }\n.body p { margin: 0 0 12px; }\n.body h2, .body h3, .body h4 { margin: 20px 0 9px; font-size: 15px; line-height: 1.6; font-weight: 650; }\n.body ul, .body ol { padding-left: 23px; margin: 10px 0 14px; }\n.body li { padding-left: 2px; margin-bottom: 5px; }\n.body li p { margin-bottom: 6px; }\n.body a { color: var(--ai-accent); text-underline-offset: 3px; }\n.body code { font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--ai-soft); padding: 2px 4px; border-radius: 4px; }\n.body pre { overflow: auto; padding: 12px; background: var(--ai-soft); border-radius: 8px; white-space: pre; }\n.body pre code { padding: 0; background: transparent; }\n.body blockquote { margin: 12px 0; padding: 10px 14px; background: var(--ai-soft); color: var(--ai-muted); border-radius: 6px; }\n.body hr { border: 0; border-top: 1px solid var(--ai-line); margin: 18px 0; }\n.table-scroll { overflow: auto; }\ntable { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 12px; }\ntd, th { border: 1px solid var(--ai-line); padding: 6px 8px; text-align: left; }\nth { background: var(--ai-soft); }\n/* 思考过程默认弱化显示，思考阶段限制高度并在框内跟随最新内容。 */\n.thinking { margin-bottom: 8px; }\n.thinking summary { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; border-radius: 6px; font-size: 12px; color: var(--ai-muted); cursor: pointer; list-style: none; user-select: none; }\n.thinking summary::-webkit-details-marker { display: none; }\n.thinking summary:focus-visible { outline: 2px solid var(--ai-accent); outline-offset: 2px; }\n@media (hover: hover) { .thinking summary:hover { color: var(--ai-text); } }\n.thinking summary .ui-icon { width: 13px; height: 13px; rotate: -90deg; }\n.thinking[open] summary .ui-icon { rotate: 0deg; }\n.thinking-text { margin: 4px 0 6px; padding-left: 12px; border-left: 2px solid var(--ai-line); font-size: 12px; line-height: 1.75; color: var(--ai-muted); white-space: pre-wrap; overflow-wrap: anywhere; }\n.message[data-thinking] .thinking-text { max-height: 220px; overflow-y: auto; }\n.message-note { font-size: 12px; margin-top: 8px; color: var(--ai-muted); overflow-wrap: anywhere; }\n.message-note:empty { display: none; }\n.message[data-status=\"error\"] .message-note { color: var(--danger, #c74949); }\n.composer { flex: none; padding: 0 16px 14px; }\n.composer-box { padding: 6px; border: 1px solid var(--ai-line); border-radius: 12px; background: var(--ai-soft); }\ntextarea, input { display: block; width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--ai-line); background: var(--ai-bg); }\ntextarea { min-height: 40px; max-height: 160px; padding: 9px 10px; resize: none; line-height: 1.6; border: 0; background: transparent; }\n.composer-box:has(textarea:focus-visible) { border-color: var(--ai-muted); }\ntextarea:focus-visible { outline: none; }\n.composer-actions { justify-content: space-between; padding: 10px 2px 2px; }\n.composer-tools { min-width: 0; gap: 0; }\n.scope-button, .effort-button, .refresh-action { display: flex; align-items: center; gap: 6px; padding: 8px; font-size: 12px; white-space: nowrap; }\n.scope-button, .effort-button { color: var(--ai-muted); }\n.scope-button .ui-icon, .effort-button .ui-icon { width: 13px; height: 13px; }\n.refresh-action .ui-icon { width: 15px; height: 15px; }\n.send-slot { display: grid; flex: none; border-radius: 8px; background: var(--ai-accent); color: #fff; }\n@media (hover: hover) { .send-slot:has(button:not(:disabled):hover) { background: color-mix(in srgb, var(--ai-accent) 88%, #000); } }\n.send-slot > .send-button { grid-area: 1 / 1; width: 40px; padding: 8px; background: transparent; }\n.send-button:disabled { opacity: 1; color: var(--ai-muted); background: color-mix(in srgb, var(--ai-text) 8%, var(--ai-bg)); }\n.typing { display: none; align-items: center; gap: 5px; height: 26px; }\n.message[data-status=\"generating\"]:has(.body:empty):has(.thinking[hidden]) .typing { display: flex; }\n.typing i { width: 5px; height: 5px; border-radius: 50%; background: var(--ai-muted); opacity: .35; }\n.latest { position: absolute; left: 50%; translate: -50% 0; bottom: calc(var(--ai-composer-height, 114px) + 10px); display: grid; place-items: center; width: 32px; height: 32px; min-height: 32px; padding: 0; border: 1px solid var(--ai-line); border-radius: 50%; color: var(--ai-muted); background: var(--ai-bg); box-shadow: 0 2px 8px #0002; }\n.latest .ui-icon { width: 16px; height: 16px; }\n.popover { position: absolute; z-index: 2; padding: 6px; background: var(--ai-raised); border: 1px solid var(--ai-line); border-radius: 10px; box-shadow: 0 8px 24px #0003; }\n/* 毛玻璃只用于小面积浮层：面积小、打开少，背后文字模糊后更易读。 */\n@supports (backdrop-filter: blur(1px)) {\n  .popover, .latest { border-color: transparent; background: var(--ai-glass); backdrop-filter: blur(16px) saturate(1.4); }\n  .popover { box-shadow: inset 0 0 0 1px var(--ai-hairline), 0 8px 24px #0003; }\n  .latest { box-shadow: inset 0 0 0 1px var(--ai-hairline), 0 2px 8px #0002; }\n}\n.more-popover { transform-origin: top right; top: 54px; right: 14px; width: 220px; max-height: calc(100% - 72px); overflow-y: auto; }\n.menu-item { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 40px; padding: 8px 10px; text-align: left; background: transparent; font-size: 13px; }\n.menu-item .ui-icon { width: 16px; height: 16px; }\n.menu-model { display: block; margin: 6px 4px 0; padding: 9px 6px 4px; border-top: 1px solid var(--ai-line); color: var(--ai-muted); font-size: 11px; overflow-wrap: anywhere; }\n.menu-model:empty { display: none; }\n.scope-popover, .effort-popover { transform-origin: bottom left; bottom: calc(var(--ai-composer-height, 114px) + 8px); max-height: calc(100% - var(--ai-composer-height, 114px) - 100px); overflow-y: auto; }\n.scope-popover { left: 16px; width: 196px; }\n.effort-popover { left: 128px; width: 168px; max-width: calc(100% - 144px); }\n.option-item { justify-content: space-between; }\n.option-item .ui-icon { visibility: hidden; }\n.option-item[aria-checked=\"true\"] { color: var(--ai-accent); }\n.option-item[aria-checked=\"true\"] .ui-icon { visibility: visible; }\n.menu-caption { display: block; padding: 5px 10px; font-size: 11px; color: var(--ai-muted); }\nselect { padding: 8px 10px; min-height: 40px; background: var(--ai-bg); border: 1px solid var(--ai-line); border-radius: 6px; max-width: 100%; }\n.scope-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 5px; padding: 5px 4px 0; border-top: 1px solid var(--ai-line); }\n.context-count { color: var(--ai-muted); font-size: 11px; font-variant-numeric: tabular-nums; }\n.history { padding: 4px; }\n.history select { width: 100%; font-size: 12px; }\n/* 导出图片：上方预览实际生成的 PNG，下方选择背景并复制或保存。 */\n.exporter { flex: 1; min-height: 0; display: flex; flex-direction: column; }\n.export-preview { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 8px 16px 16px; }\n.export-preview canvas { display: block; width: min(100%, 375px); height: auto; margin: 0 auto; border-radius: 12px; box-shadow: 0 0 0 1px var(--ai-hairline), 0 4px 20px #0000001a; }\n.export-preview[aria-busy=\"true\"] canvas { opacity: .55; }\n.export-bar { flex: none; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 16px 14px; border-top: 1px solid var(--ai-line); }\n.export-themes { display: flex; gap: 2px; }\n.theme-option { display: flex; align-items: center; gap: 6px; padding: 8px 10px; font-size: 12px; color: var(--ai-muted); }\n.theme-option[aria-pressed=\"true\"] { color: var(--ai-text); background: var(--ai-soft); }\n.swatch { width: 14px; height: 14px; border-radius: 50%; box-shadow: inset 0 0 0 1px var(--ai-hairline); }\n.export-actions { gap: 6px; }\n.export-actions button { font-size: 13px; }\n.settings { flex: 1; overflow: auto; overscroll-behavior: contain; padding: 20px 16px; }\n.field { display: block; margin-bottom: 18px; }\n.field span { display: block; margin-bottom: 7px; font-size: 12px; }\n.field select { width: 100%; min-height: 40px; padding: 8px 12px; }\n.settings .actions { justify-content: flex-end; }\n.settings-actions { gap: 8px; }\n.test-result { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--ai-line); font-size: 12px; color: var(--ai-muted); overflow-wrap: anywhere; }\n.test-result[data-state=\"error\"] { color: var(--danger, #c74949); }\n.test-model { margin-bottom: 12px; color: var(--ai-text); }\n.test-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }\n.test-metrics span, .test-metrics strong { display: block; }\n.test-metrics strong { margin-top: 4px; color: var(--ai-text); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }\n.test-note { margin-top: 12px; font-size: 11px; }\n/* 动效按使用频率分级：只动 transform、opacity 和小元素的 filter。 */\n@media (prefers-reduced-motion: no-preference) {\n  button { transition: scale .12s var(--ai-ease), background-color .12s; }\n  button:not(:disabled):active { scale: .96; }\n  .menu-item:not(:disabled):active { scale: 1; background: color-mix(in srgb, var(--ai-text) 14%, var(--ai-bg)); }\n  .composer-box { transition: border-color .12s; }\n  .resize::after { transition: opacity .12s; }\n  .panel { transform-origin: right bottom; transition: opacity .22s var(--ai-ease), transform .22s var(--ai-ease); }\n  .panel[data-closing] { opacity: 0; transform: translateX(8px); pointer-events: none; transition-duration: .15s; transition-timing-function: ease-in; }\n  .popover { transition: opacity .14s var(--ai-ease), transform .14s var(--ai-ease); }\n  .latest { transition: opacity .16s var(--ai-ease), translate .16s var(--ai-ease), scale .12s var(--ai-ease); }\n  .send-slot > .send-button { transition: opacity .18s var(--ai-ease), scale .18s var(--ai-ease), filter .18s var(--ai-ease); }\n  @starting-style {\n    .panel { opacity: 0; transform: translateX(12px) scale(.985); }\n    .popover { opacity: 0; transform: scale(.97); }\n    .latest { opacity: 0; translate: -50% 6px; }\n    .send-slot > .send-button { opacity: 0; scale: .25; filter: blur(4px); }\n  }\n  .message.enter { animation: ai-rise .18s var(--ai-ease) both; }\n  .message.assistant.enter { animation-delay: .05s; }\n  .swap-in { animation: ai-swap .18s var(--ai-ease); }\n  .typing i { animation: ai-dot 1.2s ease-in-out infinite; }\n  .thinking summary .ui-icon { transition: rotate .15s var(--ai-ease); }\n  .message[data-thinking] .thinking summary span { animation: ai-breathe 1.6s ease-in-out infinite; }\n  .typing i:nth-child(2) { animation-delay: .15s; }\n  .typing i:nth-child(3) { animation-delay: .3s; }\n}\n/* 减弱动态效果：取消位移与缩放，只保留 100ms 淡入。 */\n@media (prefers-reduced-motion: reduce) {\n  .panel, .popover, .latest { transition: opacity .1s linear; }\n  @starting-style { .panel, .popover, .latest { opacity: 0; } }\n}\n[data-instant] { transition: none !important; }\n@keyframes ai-rise { from { opacity: 0; transform: translateY(6px); } }\n@keyframes ai-swap { from { opacity: 0; scale: .25; filter: blur(4px); } }\n@keyframes ai-dot { 0%, 80%, 100% { opacity: .35; } 40% { opacity: 1; } }\n@keyframes ai-breathe { 50% { opacity: .45; } }\n@media (max-width: 620px) {\n  .resize { display: none; }\n  .panel { inset: 0; height: auto; width: 100%; max-width: none; border-radius: 0; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }\n  .launcher { right: 14px; bottom: 18px; }\n}\n@media (max-height: 500px) {\n  .head { padding-block: 4px 8px; }\n  .composer { padding-bottom: 8px; }\n}\n";
+const styles = ":host {\n  --ai-bg: var(--secondary, #fff);\n  --ai-text: var(--primary, #23252a);\n  --ai-muted: var(--primary-high, #5d6470);\n  --ai-line: var(--primary-low, #e2e4e8);\n  --ai-accent: var(--tertiary, #315ca8);\n  --ai-soft: color-mix(in srgb, var(--ai-text) 4%, var(--ai-bg));\n  --ai-raised: color-mix(in srgb, var(--ai-text) 6%, var(--ai-bg));\n  --ai-glass: color-mix(in srgb, var(--ai-raised) 78%, transparent);\n  --ai-hairline: color-mix(in srgb, var(--ai-text) 12%, transparent);\n  --ai-ease: cubic-bezier(.16, 1, .3, 1);\n  font: 14px/1.6 var(--font-family, -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif);\n  color: var(--ai-text);\n  -webkit-font-smoothing: antialiased;\n}\n* { box-sizing: border-box; }\n[hidden] { display: none !important; }\nbutton, input, textarea, select { font: inherit; color: inherit; }\nbutton, select { cursor: pointer; }\nbutton { min-height: 40px; border: 0; border-radius: 8px; padding: 8px 12px; background: var(--ai-soft); touch-action: manipulation; }\nbutton:disabled, select:disabled { cursor: default; opacity: .45; }\nbutton:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid var(--ai-accent); outline-offset: 2px; }\n@media (hover: hover) { button:not(:disabled):hover { background: color-mix(in srgb, var(--ai-text) 10%, var(--ai-bg)); } }\n.primary { background: var(--ai-accent); color: #fff; font-weight: 600; }\n@media (hover: hover) { .primary:not(:disabled):hover { background: color-mix(in srgb, var(--ai-accent) 88%, #000); } }\n.quiet { background: transparent; }\n.icon-button { display: inline-grid; place-items: center; flex: none; width: 40px; height: 40px; padding: 10px; }\n.ui-icon, .linuxdo-ai-icon { flex: none; width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }\n.ui-icon-more { stroke-width: 3.8; }\n.ui-icon-stop { width: 15px; height: 15px; fill: currentColor; stroke-width: 0; }\n.launcher { position: fixed; right: 22px; bottom: 22px; z-index: 1001; width: 40px; height: 40px; padding: 10px; border: 1px solid var(--ai-line); background: var(--ai-bg); display: grid; place-items: center; }\n/* 贴右下角，高度约为可用高度的三分之二；矮窗口至少 420px，且不超出可用高度。 */\n.panel { --ai-room: calc(100dvh - max(12px, env(safe-area-inset-top)) - max(12px, env(safe-area-inset-bottom))); position: fixed; z-index: 1002; right: 12px; bottom: max(12px, env(safe-area-inset-bottom)); height: clamp(min(var(--ai-floor, 420px), var(--ai-room)), var(--ai-room) * var(--ai-ratio, 2 / 3), var(--ai-room)); width: var(--ai-width, 440px); max-width: calc(100vw - 24px); display: flex; flex-direction: column; background: var(--ai-bg); border: 1px solid var(--ai-line); border-radius: 14px; box-shadow: 0 8px 32px #0002; overflow: hidden; }\n.panel:focus-visible { outline: 1px solid var(--ai-line); outline-offset: 0; }\n.resize { position: absolute; z-index: 3; touch-action: none; }\n.resize-top { top: 0; left: 16px; right: 16px; height: 8px; cursor: ns-resize; }\n.resize-left { left: 0; top: 16px; bottom: 16px; width: 8px; cursor: ew-resize; }\n.resize-corner { left: 0; top: 0; width: 16px; height: 16px; cursor: nwse-resize; }\n/* 悬停、聚焦或拖动时才显示的细把手。 */\n.resize-top::after, .resize-left::after { content: ''; position: absolute; border-radius: 2px; background: var(--ai-muted); opacity: 0; }\n.resize-top::after { top: 3px; left: 50%; width: 32px; height: 3px; translate: -50% 0; }\n.resize-left::after { left: 3px; top: 50%; width: 3px; height: 32px; translate: 0 -50%; }\n.resize:hover::after, .resize:focus-visible::after, .panel[data-resizing] .resize::after { opacity: .5; }\n.resize:focus-visible { outline: none; }\n.resize:focus-visible::after { opacity: 1; background: var(--ai-accent); }\n.panel[data-resizing] { transition: none; user-select: none; }\n.head { padding: 8px 12px 4px 16px; flex: none; }\n.head-row, .actions, .composer-actions { display: flex; align-items: center; gap: 4px; }\n.head-row { justify-content: space-between; }\n.brand { display: flex; align-items: center; gap: 4px; }\n.brand strong { font-size: 15px; font-weight: 650; }\n.brand .icon-button { margin-left: -8px; }\n.status { flex: none; margin: 0; padding: 4px 18px 8px; font-size: 12px; color: var(--ai-muted); overflow-wrap: anywhere; }\n.status.error { color: var(--danger, #c74949); }\n.conversation { overflow-y: auto; overscroll-behavior: contain; flex: 1; padding: 10px 16px 8px; min-height: 0; scrollbar-gutter: stable; }\n.message { padding: 4px 0 14px; }\n.message-head { margin-bottom: 6px; font-size: 12px; line-height: 1.5; color: var(--ai-muted); overflow-wrap: anywhere; }\n.message-actions { gap: 0; margin: 2px 0 0 -8px; }\n.message-actions .icon-button { width: 32px; height: 32px; min-height: 32px; padding: 8px; color: var(--ai-muted); }\n.message-actions .ui-icon { width: 15px; height: 15px; }\n.message[data-status=\"generating\"] .message-actions { visibility: hidden; }\n/* 历史回答的操作在悬停时出现；最新一条与触屏始终显示。 */\n@media (hover: hover) {\n  .message-actions { opacity: 0; transition: opacity .15s; }\n  .message:hover .message-actions, .message:last-child .message-actions, .message-actions:focus-within { opacity: 1; }\n}\n.message.user .body { background: var(--ai-soft); border-radius: 8px; padding: 9px 12px; white-space: pre-wrap; }\n.body { overflow-wrap: anywhere; line-height: 1.8; font-size: 14px; }\n.body:empty { display: none; }\n.body > :first-child { margin-top: 0; }\n.body > :last-child { margin-bottom: 0; }\n.body p { margin: 0 0 12px; }\n.body h2, .body h3, .body h4 { margin: 20px 0 9px; font-size: 15px; line-height: 1.6; font-weight: 650; }\n.body ul, .body ol { padding-left: 23px; margin: 10px 0 14px; }\n.body li { padding-left: 2px; margin-bottom: 5px; }\n.body li p { margin-bottom: 6px; }\n.body a { color: var(--ai-accent); text-underline-offset: 3px; }\n.body code { font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--ai-soft); padding: 2px 4px; border-radius: 4px; }\n.body pre { overflow: auto; padding: 12px; background: var(--ai-soft); border-radius: 8px; white-space: pre; }\n.body pre code { padding: 0; background: transparent; }\n.body blockquote { margin: 12px 0; padding: 10px 14px; background: var(--ai-soft); color: var(--ai-muted); border-radius: 6px; }\n.body hr { border: 0; border-top: 1px solid var(--ai-line); margin: 18px 0; }\n.table-scroll { overflow: auto; }\ntable { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 12px; }\ntd, th { border: 1px solid var(--ai-line); padding: 6px 8px; text-align: left; }\nth { background: var(--ai-soft); }\n/* 思考过程默认弱化显示，思考阶段限制高度并在框内跟随最新内容。 */\n.thinking { margin-bottom: 8px; }\n.thinking summary { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; border-radius: 6px; font-size: 12px; color: var(--ai-muted); cursor: pointer; list-style: none; user-select: none; }\n.thinking summary::-webkit-details-marker { display: none; }\n.thinking summary:focus-visible { outline: 2px solid var(--ai-accent); outline-offset: 2px; }\n@media (hover: hover) { .thinking summary:hover { color: var(--ai-text); } }\n.thinking summary .ui-icon { width: 13px; height: 13px; rotate: -90deg; }\n.thinking[open] summary .ui-icon { rotate: 0deg; }\n.thinking-text { margin: 4px 0 6px; padding-left: 12px; border-left: 2px solid var(--ai-line); font-size: 12px; line-height: 1.75; color: var(--ai-muted); white-space: pre-wrap; overflow-wrap: anywhere; }\n.message[data-thinking] .thinking-text { max-height: 220px; overflow-y: auto; }\n.message-note { font-size: 12px; margin-top: 8px; color: var(--ai-muted); overflow-wrap: anywhere; }\n.message-note:empty { display: none; }\n.message[data-status=\"error\"] .message-note { color: var(--danger, #c74949); }\n.composer { flex: none; padding: 0 16px 14px; }\n.composer-box { padding: 6px; border: 1px solid var(--ai-line); border-radius: 12px; background: var(--ai-soft); }\ntextarea, input { display: block; width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--ai-line); background: var(--ai-bg); }\ntextarea { min-height: 40px; max-height: 160px; padding: 9px 10px; resize: none; line-height: 1.6; border: 0; background: transparent; }\n.composer-box:has(textarea:focus-visible) { border-color: var(--ai-muted); }\ntextarea:focus-visible { outline: none; }\n.composer-actions { justify-content: space-between; padding: 10px 2px 2px; }\n.composer-tools { min-width: 0; gap: 0; }\n.scope-button, .effort-button, .refresh-action { display: flex; align-items: center; gap: 6px; padding: 8px; font-size: 12px; white-space: nowrap; }\n.scope-button, .effort-button { color: var(--ai-muted); }\n.scope-button .ui-icon, .effort-button .ui-icon { width: 13px; height: 13px; }\n.refresh-action .ui-icon { width: 15px; height: 15px; }\n.send-slot { display: grid; flex: none; border-radius: 8px; background: var(--ai-accent); color: #fff; }\n@media (hover: hover) { .send-slot:has(button:not(:disabled):hover) { background: color-mix(in srgb, var(--ai-accent) 88%, #000); } }\n.send-slot > .send-button { grid-area: 1 / 1; width: 40px; padding: 8px; background: transparent; }\n.send-button:disabled { opacity: 1; color: var(--ai-muted); background: color-mix(in srgb, var(--ai-text) 8%, var(--ai-bg)); }\n.typing { display: none; align-items: center; gap: 5px; height: 26px; }\n.message[data-status=\"generating\"]:has(.body:empty):has(.thinking[hidden]) .typing { display: flex; }\n.typing i { width: 5px; height: 5px; border-radius: 50%; background: var(--ai-muted); opacity: .35; }\n.latest { position: absolute; left: 50%; translate: -50% 0; bottom: calc(var(--ai-composer-height, 114px) + 10px); display: grid; place-items: center; width: 32px; height: 32px; min-height: 32px; padding: 0; border: 1px solid var(--ai-line); border-radius: 50%; color: var(--ai-muted); background: var(--ai-bg); box-shadow: 0 2px 8px #0002; }\n.latest .ui-icon { width: 16px; height: 16px; }\n.popover { position: absolute; z-index: 2; padding: 6px; background: var(--ai-raised); border: 1px solid var(--ai-line); border-radius: 10px; box-shadow: 0 8px 24px #0003; }\n/* 毛玻璃只用于小面积浮层：面积小、打开少，背后文字模糊后更易读。 */\n@supports (backdrop-filter: blur(1px)) {\n  .popover, .latest { border-color: transparent; background: var(--ai-glass); backdrop-filter: blur(16px) saturate(1.4); }\n  .popover { box-shadow: inset 0 0 0 1px var(--ai-hairline), 0 8px 24px #0003; }\n  .latest { box-shadow: inset 0 0 0 1px var(--ai-hairline), 0 2px 8px #0002; }\n}\n.more-popover { transform-origin: top right; top: 54px; right: 14px; width: 220px; max-height: calc(100% - 72px); overflow-y: auto; }\n.menu-item { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 40px; padding: 8px 10px; text-align: left; background: transparent; font-size: 13px; }\n.menu-item .ui-icon { width: 16px; height: 16px; }\n.menu-model { display: block; margin: 6px 4px 0; padding: 9px 6px 4px; border-top: 1px solid var(--ai-line); color: var(--ai-muted); font-size: 11px; overflow-wrap: anywhere; }\n.menu-model:empty { display: none; }\n.scope-popover, .effort-popover { transform-origin: bottom left; bottom: calc(var(--ai-composer-height, 114px) + 8px); max-height: calc(100% - var(--ai-composer-height, 114px) - 100px); overflow-y: auto; }\n.scope-popover { left: 16px; width: 212px; }\n.effort-popover { left: 128px; width: 168px; max-width: calc(100% - 144px); }\n.option-item { justify-content: space-between; }\n.option-item .ui-icon { visibility: hidden; }\n.option-item[aria-checked=\"true\"] { color: var(--ai-accent); }\n.option-item[aria-checked=\"true\"] .ui-icon { visibility: visible; }\n.menu-caption { display: block; padding: 5px 10px; font-size: 11px; color: var(--ai-muted); }\nselect { padding: 8px 10px; min-height: 40px; background: var(--ai-bg); border: 1px solid var(--ai-line); border-radius: 6px; max-width: 100%; }\n.scope-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 5px; padding: 5px 0 0 10px; border-top: 1px solid var(--ai-line); }\n/* 底栏文字与选项文字左对齐，更新按钮的文字与勾选图标右对齐。 */\n.scope-footer .refresh-action { padding-inline: 10px; }\n.context-count { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ai-muted); font-size: 11px; font-variant-numeric: tabular-nums; }\n.context-count[data-state=\"error\"] { color: var(--danger, #c74949); }\n.history { padding: 4px; }\n.history select { width: 100%; font-size: 12px; }\n/* 导出图片：上方预览实际生成的 PNG，下方选择背景并复制或保存。 */\n.exporter { flex: 1; min-height: 0; display: flex; flex-direction: column; }\n.export-preview { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 8px 16px 16px; }\n.export-preview canvas { display: block; width: min(100%, 375px); height: auto; margin: 0 auto; border-radius: 12px; box-shadow: 0 0 0 1px var(--ai-hairline), 0 4px 20px #0000001a; }\n.export-preview[aria-busy=\"true\"] canvas { opacity: .55; }\n.export-bar { flex: none; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 16px 14px; border-top: 1px solid var(--ai-line); }\n.export-themes { display: flex; gap: 2px; }\n.theme-option { display: flex; align-items: center; gap: 6px; padding: 8px 10px; font-size: 12px; color: var(--ai-muted); }\n.theme-option[aria-pressed=\"true\"] { color: var(--ai-text); background: var(--ai-soft); }\n.swatch { width: 14px; height: 14px; border-radius: 50%; box-shadow: inset 0 0 0 1px var(--ai-hairline); }\n.export-actions { gap: 6px; }\n.export-actions button { font-size: 13px; }\n.settings { flex: 1; overflow: auto; overscroll-behavior: contain; padding: 20px 16px; }\n.field { display: block; margin-bottom: 18px; }\n.field span { display: block; margin-bottom: 7px; font-size: 12px; }\n.field select { width: 100%; min-height: 40px; padding: 8px 12px; }\n.settings .actions { justify-content: flex-end; }\n.settings-actions { gap: 8px; }\n.test-result { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--ai-line); font-size: 12px; color: var(--ai-muted); overflow-wrap: anywhere; }\n.test-result[data-state=\"error\"] { color: var(--danger, #c74949); }\n.test-model { margin-bottom: 12px; color: var(--ai-text); }\n.test-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }\n.test-metrics span, .test-metrics strong { display: block; }\n.test-metrics strong { margin-top: 4px; color: var(--ai-text); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }\n.test-note { margin-top: 12px; font-size: 11px; }\n/* 动效按使用频率分级：只动 transform、opacity 和小元素的 filter。 */\n@media (prefers-reduced-motion: no-preference) {\n  button { transition: scale .12s var(--ai-ease), background-color .12s; }\n  button:not(:disabled):active { scale: .96; }\n  .menu-item:not(:disabled):active { scale: 1; background: color-mix(in srgb, var(--ai-text) 14%, var(--ai-bg)); }\n  .composer-box { transition: border-color .12s; }\n  .resize::after { transition: opacity .12s; }\n  .panel { transform-origin: right bottom; transition: opacity .22s var(--ai-ease), transform .22s var(--ai-ease); }\n  .panel[data-closing] { opacity: 0; transform: translateX(8px); pointer-events: none; transition-duration: .15s; transition-timing-function: ease-in; }\n  .popover { transition: opacity .14s var(--ai-ease), transform .14s var(--ai-ease); }\n  .latest { transition: opacity .16s var(--ai-ease), translate .16s var(--ai-ease), scale .12s var(--ai-ease); }\n  .send-slot > .send-button { transition: opacity .18s var(--ai-ease), scale .18s var(--ai-ease), filter .18s var(--ai-ease); }\n  @starting-style {\n    .panel { opacity: 0; transform: translateX(12px) scale(.985); }\n    .popover { opacity: 0; transform: scale(.97); }\n    .latest { opacity: 0; translate: -50% 6px; }\n    .send-slot > .send-button { opacity: 0; scale: .25; filter: blur(4px); }\n  }\n  .message.enter { animation: ai-rise .18s var(--ai-ease) both; }\n  .message.assistant.enter { animation-delay: .05s; }\n  .swap-in { animation: ai-swap .18s var(--ai-ease); }\n  .typing i { animation: ai-dot 1.2s ease-in-out infinite; }\n  .thinking summary .ui-icon { transition: rotate .15s var(--ai-ease); }\n  .message[data-thinking] .thinking summary span { animation: ai-breathe 1.6s ease-in-out infinite; }\n  .typing i:nth-child(2) { animation-delay: .15s; }\n  .typing i:nth-child(3) { animation-delay: .3s; }\n}\n/* 减弱动态效果：取消位移与缩放，只保留 100ms 淡入。 */\n@media (prefers-reduced-motion: reduce) {\n  .panel, .popover, .latest { transition: opacity .1s linear; }\n  @starting-style { .panel, .popover, .latest { opacity: 0; } }\n}\n[data-instant] { transition: none !important; }\n@keyframes ai-rise { from { opacity: 0; transform: translateY(6px); } }\n@keyframes ai-swap { from { opacity: 0; scale: .25; filter: blur(4px); } }\n@keyframes ai-dot { 0%, 80%, 100% { opacity: .35; } 40% { opacity: 1; } }\n@keyframes ai-breathe { 50% { opacity: .45; } }\n@media (max-width: 620px) {\n  .resize { display: none; }\n  .panel { inset: 0; height: auto; width: 100%; max-width: none; border-radius: 0; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }\n  .launcher { right: 14px; bottom: 18px; }\n}\n@media (max-height: 500px) {\n  .head { padding-block: 4px 8px; }\n  .composer { padding-bottom: 8px; }\n}\n";
 
 
 
@@ -828,8 +842,8 @@ const SIZE = { minHeight: 320, minWidth: 360, maxWidth: 900, step: 24 };
 const DEEPSEEK = { endpoint: 'https://api.deepseek.com/chat/completions', models: ['deepseek-flash', 'deepseek-v4-pro'] };
 const uuid = () => crypto.randomUUID();
 const clone = value => JSON.parse(JSON.stringify(value));
-const labels = { first: '仅首帖', '5': '前 5 帖', '10': '前 10 帖', '20': '前 20 帖', all: '全部帖子' };
-const state = { topicId: null, record: null, session: null, task: null, probe: null, config: {}, context: null, open: false, view: 'chat', popover: null };
+const labels = { first: '仅首帖', '5': '前 5 帖', all: '全部帖子' };
+const state = { topicId: null, record: null, session: null, task: null, probe: null, read: null, config: {}, open: false, view: 'chat', popover: null };
 const nodes = new Map();
 let storageNotice = '', scheduled = false, timelineButton, lastTrigger, closeTimer;
 const postMenus = new WeakMap(), revealedPostMenus = new WeakSet();
@@ -881,21 +895,22 @@ const closeButton = iconButton('关闭 AI 面板', 'close', event => closePanel(
 panel.append(element('header', { class: 'head' }, [
   element('div', { class: 'head-row' }, [element('div', { class: 'brand' }, [backButton, panelTitle]), element('div', { class: 'actions' }, [moreButton, exportButton, closeButton])]),
 ]));
-const scopeOptions = ['first', '5', '10', '20', 'all'].map(value => element('button', {
+const scopeOptions = ['first', '5', 'all'].map(value => element('button', {
   class: 'menu-item option-item', type: 'button', role: 'menuitemradio', 'aria-checked': 'false', 'data-value': value,
   onClick: () => {
     if (state.task || !state.session) return;
-    state.session.scope = value; state.context = null; persist(); refreshControls(); setStatus(''); closePopover(true);
+    state.session.scope = value; persist(); refreshControls(); setStatus(''); closePopover(true);
   },
 }, [element('span', { text: labels[value] }), uiIcon('check')]));
-const refreshButton = element('button', { class: 'quiet refresh-action', type: 'button', 'aria-label': '更新帖子上下文', onClick: () => { closePopover(); void refreshContext(); } }, [uiIcon('refresh'), element('span', { text: '更新原文' })]);
+// 浮层保持打开，底栏直接显示读取进度。
+const refreshButton = element('button', { class: 'quiet refresh-action', type: 'button', 'aria-label': '更新帖子上下文', onClick: () => { if (!state.task && !reading()) readTopic(true); } }, [uiIcon('refresh'), element('span', { text: '更新原文' })]);
 const newButton = element('button', { class: 'menu-item', type: 'button', onClick: () => {
   if (!state.record || state.task) return;
   closePopover();
   if (!state.session.messages.length) { questionInput.focus(); return; }
   const next = newSession(state.session.scope);
   state.record.sessions.unshift(next); state.record.activeId = next.id; state.session = next;
-  state.context = null; questionInput.value = ''; resizeComposer(); persist(); renderMessages(); refreshControls(); setStatus(''); questionInput.focus();
+  questionInput.value = ''; resizeComposer(); persist(); renderMessages(); refreshControls(); setStatus(''); questionInput.focus();
 } }, [uiIcon('plus'), element('span', { text: '新对话' })]);
 const historyButton = element('button', { class: 'menu-item', type: 'button', 'aria-expanded': 'false', 'aria-controls': 'conversation-history', onClick: () => {
   historyBox.hidden = !historyBox.hidden; historyButton.setAttribute('aria-expanded', String(!historyBox.hidden)); fillHistory(); if (!historyBox.hidden) historySelect.focus();
@@ -905,7 +920,7 @@ const modelMeta = element('span', { class: 'menu-model' });
 const historySelect = element('select', { 'aria-label': '选择历史对话', onChange: () => {
   const session = state.record?.sessions.find(item => item.id === historySelect.value);
   if (!session || state.task) return;
-  state.record.activeId = session.id; state.session = session; state.context = null; questionInput.value = '';
+  state.record.activeId = session.id; state.session = session; questionInput.value = '';
   resizeComposer(); persist(); renderMessages(); scrollLatest(); refreshControls(); setStatus(''); closePopover(true);
 } });
 const historyBox = element('div', { class: 'history', id: 'conversation-history', hidden: true }, [historySelect]);
@@ -1268,8 +1283,10 @@ function closePanel({ instant = false } = {}) {
   else { panel.removeAttribute('data-instant'); panel.setAttribute('data-closing', ''); closeTimer = setTimeout(finish, 150); }
   lastTrigger?.isConnected && lastTrigger.focus(); reconcile();
 }
+// 点 AI 按钮时开始读取全部帖子；从导出图片或油猴菜单打开面板不读取。
 function activate(event) {
   openPanel(event?.detail === 0);
+  if (state.topicId && state.read?.topicId !== state.topicId) readTopic();
 }
 // 生成过程中不自动滚动；只在打开、切换对话或点击按钮时跳到最新。
 function scrollLatest() {
@@ -1331,7 +1348,7 @@ function refreshControls() {
   }
   if (state.view === 'chat') panelTitle.title = state.record?.title || '';
   scopeLabel.textContent = labels[state.session?.scope || '5'];
-  contextMeta.textContent = state.context ? `${state.context.count}/${state.context.total} 帖` : '';
+  refreshReadMeta();
   modelMeta.textContent = state.config.model || '';
   fillHistory();
 }
@@ -1513,19 +1530,50 @@ async function getJson(path, signal) {
   return response.json();
 }
 
-async function refreshContext() {
-  if (state.task || !state.topicId) return;
-  const task = { topicId: state.topicId, session: state.session, record: state.record, controller: new AbortController() };
-  state.task = task; state.context = null; refreshControls(); setStatus('正在读取…');
-  try {
-    const context = await collectTopic({ topicId: task.topicId, scope: task.session.scope, getJson, toText: htmlToText, signal: task.controller.signal,
-      onProgress: (loaded, total) => { if (state.task === task) setStatus(`正在读取 ${loaded}/${total} 帖…`); } });
-    if (state.task !== task || topicIdFromUrl(location.href) !== task.topicId) return;
-    state.context = context; state.record.title = context.title; persist();
-    setStatus(`已读取 ${context.count}/${context.total} 帖`);
-  } catch (error) {
-    if (state.task === task) setStatus(error.name === 'AbortError' ? '已停止读取。' : error.message, error.name !== 'AbortError');
-  } finally { if (state.task === task) { state.task = null; refreshControls(); } }
+// 后台读取全部帖子，三档范围都从这一份截取。只读论坛、不调用模型，也不占用输入框；关闭面板后继续读。
+function readTopic(force = false) {
+  if (!state.topicId) return null;
+  if (state.read?.topicId === state.topicId && !force) return state.read;
+  state.read?.controller.abort();
+  const read = { topicId: state.topicId, controller: new AbortController(), data: null, error: null, done: false, waiters: new Set() };
+  const notify = () => {
+    for (const resolve of read.waiters) resolve();
+    read.waiters.clear();
+    if (state.read === read) refreshReadMeta();
+  };
+  state.read = read;
+  loadTopic({ topicId: read.topicId, getJson, toText: htmlToText, signal: read.controller.signal, onProgress: data => { read.data = data; notify(); } })
+    .catch(error => { read.error = error; })
+    .finally(() => { read.done = true; notify(); });
+  refreshReadMeta();
+  return read;
+}
+function reading() { return state.read?.topicId === state.topicId && !state.read.done; }
+function refreshReadMeta() {
+  const read = state.read?.topicId === state.topicId ? state.read : null;
+  const data = read?.data, failed = read?.done && read.error && read.error.name !== 'AbortError';
+  const [text, kind, title] = !read || (read.done && !failed && !data?.done) ? ['尚未读取', 'idle', '']
+    : failed ? ['读取失败', 'error', read.error.message]
+    : !read.done ? [data ? `读取中 ${data.posts.size}/${data.ids.length}` : '读取中…', 'loading', '']
+    : data.overflow ? ['全文超 12 万字', 'overflow', `已读 ${data.posts.size}/${data.ids.length} 帖。全文超过 12 万字，“全部帖子”无法发送，可选前 5 帖或仅首帖。`]
+    : [`已读 ${data.posts.size}/${data.ids.length} 帖`, 'ready', ''];
+  contextMeta.textContent = text; contextMeta.dataset.state = kind; contextMeta.title = title;
+}
+// 发送时从预读结果截取所选范围：首帖和前 5 帖在第一次请求后就能用；还没读到就等这次读取，
+// 之前读取失败则由这次发送重新读一次，不会自动重试。
+async function contextFor(task, current) {
+  const signal = task.controller.signal;
+  const stopped = new Promise((_, reject) => signal.addEventListener('abort', () => reject(abortError()), { once: true }));
+  stopped.catch(() => {});
+  let read = state.read?.topicId === task.topicId && !(state.read.done && state.read.error) ? state.read : readTopic(true);
+  for (;;) {
+    checkAbort(signal);
+    const context = read.data && scopeContext(read.data, task.session.scope);
+    if (context) return context;
+    if (read.done) throw read.error || new Error('没有取得帖子内容，请稍后重试。');
+    if (current()) setStatus(read.data ? `正在读取 ${read.data.posts.size}/${read.data.ids.length} 帖…` : '正在读取帖子…');
+    await Promise.race([new Promise(resolve => read.waiters.add(resolve)), stopped]);
+  }
 }
 
 async function send(rawQuestion, replaceLast = false) {
@@ -1541,15 +1589,10 @@ async function send(rawQuestion, replaceLast = false) {
   let answer, thinkStart = 0;
   const saveSoon = () => { if (Date.now() - task.lastSave > 1200) { task.lastSave = Date.now(); persist(task.record, task.topicId); } };
   try {
-    setStatus('正在读取帖子…');
-    let context = state.context;
-    if (!context || context.scope !== task.session.scope || context.topicId !== task.topicId) {
-      context = await collectTopic({ topicId: task.topicId, scope: task.session.scope, getJson, toText: htmlToText, signal: task.controller.signal,
-        onProgress: (loaded, total) => { if (current()) setStatus(`正在读取 ${loaded}/${total} 帖…`); } });
-    }
+    const context = await contextFor(task, current);
     checkAbort(task.controller.signal);
     if (!current()) return;
-    state.context = context; task.record.title = context.title;
+    task.record.title = context.title;
     const history = replaceLast ? task.session.messages.slice(0, -2) : task.session.messages;
     const messages = buildMessages(context, history, question);
     if (replaceLast) task.session.messages.splice(-2);
@@ -1673,12 +1716,13 @@ function reconcile() {
   const id = topicIdFromUrl(location.href);
   if (id !== state.topicId) {
     resetPostMenus();
-    state.task?.controller.abort(); cancelProbe(); testResult.hidden = true; state.task = null; state.context = null; state.topicId = id;
+    state.task?.controller.abort(); state.read?.controller.abort(); cancelProbe(); testResult.hidden = true; state.task = null; state.read = null; state.topicId = id;
     if (state.view === 'export') setView('chat');
     questionInput.value = ''; resizeComposer(); closePopover(); nodes.clear();
     if (id) {
       state.record = loadRecord(id); state.session = state.record.sessions.find(s => s.id === state.record.activeId);
       renderMessages(); scrollLatest(); refreshControls(); setStatus('');
+      if (state.open) readTopic();
     } else { state.record = null; state.session = null; state.open = false; }
     panel.hidden = !state.open || !id;
   }

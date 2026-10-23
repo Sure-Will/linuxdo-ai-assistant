@@ -1,4 +1,4 @@
-export const SCOPES = Object.freeze({ first: 1, '5': 5, '10': 10, '20': 20, all: Infinity });
+export const SCOPES = Object.freeze({ first: 1, '5': 5, all: Infinity });
 export const SUMMARY_PROMPT = '请简要总结这个话题的主要内容和讨论要点。';
 export const MAX_CONTEXT_CHARS = 120_000;
 export const EFFORTS = Object.freeze({ default: '默认', none: '关闭', low: '低', high: '高', max: '最高' });
@@ -73,24 +73,28 @@ export function checkAbort(signal) {
   if (signal?.aborted) throw abortError();
 }
 
-export async function collectTopic({ topicId, scope, getJson, toText, signal, onProgress = () => {} }) {
+// 按楼层顺序逐批读取全部帖子，onProgress 每批回传同一个 data，调用方可以边读边截取前几帖。
+// 累计正文超过上限后停止：超出的部分无法整体发送，继续读只会多发请求。
+export async function loadTopic({ topicId, getJson, toText, signal, onProgress = () => {} }) {
   const topic = await getJson(`/t/${topicId}.json`, signal);
   checkAbort(signal);
   if (String(topic.id) !== String(topicId)) throw new Error('话题数据与当前页面不一致，请刷新后重试。');
-  const ids = wantedPostIds(topic.post_stream?.stream, scope);
+  const ids = wantedPostIds(topic.post_stream?.stream, 'all');
   const wanted = new Set(ids);
-  const posts = new Map();
+  const data = { topicId: String(topicId), title: String(topic.title || '当前话题'), ids, posts: new Map(), chars: 0, overflow: false, done: false, fetchedAt: Date.now() };
   const accept = items => {
     for (const post of items || []) {
-      if (wanted.has(post.id) && typeof post.cooked === 'string' && post.cooked.trim() && Number.isInteger(post.post_number)) {
-        posts.set(post.id, post);
+      if (wanted.has(post.id) && !data.posts.has(post.id) && typeof post.cooked === 'string' && post.cooked.trim() && Number.isInteger(post.post_number)) {
+        const text = `#${post.post_number} @${post.username || '匿名'}\n${toText(post.cooked)}`;
+        data.posts.set(post.id, { number: post.post_number, text }); data.chars += text.length + (data.posts.size > 1 ? 2 : 0);
       }
     }
-    onProgress(posts.size, ids.length);
+    data.overflow = data.chars > MAX_CONTEXT_CHARS;
+    onProgress(data);
   };
   accept(topic.post_stream?.posts);
-  const missing = ids.filter(id => !posts.has(id));
-  for (let i = 0; i < missing.length; i += 20) {
+  const missing = ids.filter(id => !data.posts.has(id));
+  for (let i = 0; i < missing.length && !data.overflow; i += 20) {
     checkAbort(signal);
     const query = new URLSearchParams();
     missing.slice(i, i + 20).forEach(id => query.append('post_ids[]', String(id)));
@@ -99,12 +103,22 @@ export async function collectTopic({ topicId, scope, getJson, toText, signal, on
     checkAbort(signal);
     accept(result.post_stream?.posts);
   }
-  if (posts.size !== ids.length) throw new Error(`只读到 ${posts.size}/${ids.length} 篇帖子，未发送给 AI。请稍后重试或缩小范围。`);
-  const selected = ids.map(id => posts.get(id)).sort((a, b) => a.post_number - b.post_number);
-  const text = selected.map(post => `#${post.post_number} @${post.username || '匿名'}\n${toText(post.cooked)}`).join('\n\n');
+  data.done = true; onProgress(data);
+  return data;
+}
+
+// 从已读取的帖子中截取所选范围。所需楼层还没读到时返回 null，读完仍缺则报错。
+export function scopeContext(data, scope) {
+  const ids = wantedPostIds(data.ids, scope);
+  const posts = ids.map(id => data.posts.get(id)).filter(Boolean);
+  if (posts.length < ids.length) {
+    if (!data.done) return null;
+    if (data.overflow) throw new Error('所选内容超过 12 万字符，请缩小上下文范围后再生成。');
+    throw new Error(`只读到 ${posts.length}/${ids.length} 篇帖子，未发送给 AI。请稍后重试或缩小范围。`);
+  }
+  const text = posts.sort((a, b) => a.number - b.number).map(post => post.text).join('\n\n');
   if (text.length > MAX_CONTEXT_CHARS) throw new Error('所选内容超过 12 万字符，请缩小上下文范围后再生成。');
-  return { topicId: String(topicId), title: String(topic.title || '当前话题'), text, count: selected.length,
-    total: new Set(topic.post_stream.stream).size, scope, fetchedAt: Date.now() };
+  return { topicId: data.topicId, title: data.title, text, count: posts.length, total: data.ids.length, scope, fetchedAt: data.fetchedAt };
 }
 
 export function buildMessages(context, history, question) {

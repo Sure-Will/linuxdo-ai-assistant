@@ -131,7 +131,7 @@ textarea:focus-visible { outline: none; }
 .menu-model { display: block; margin: 6px 4px 0; padding: 9px 6px 4px; border-top: 1px solid var(--ai-line); color: var(--ai-muted); font-size: 11px; overflow-wrap: anywhere; }
 .menu-model:empty { display: none; }
 .scope-popover, .effort-popover { transform-origin: bottom left; bottom: calc(var(--ai-composer-height, 114px) + 8px); max-height: calc(100% - var(--ai-composer-height, 114px) - 100px); overflow-y: auto; }
-.scope-popover { left: 16px; width: 196px; }
+.scope-popover { left: 16px; width: 212px; }
 .effort-popover { left: 128px; width: 168px; max-width: calc(100% - 144px); }
 .option-item { justify-content: space-between; }
 .option-item .ui-icon { visibility: hidden; }
@@ -139,8 +139,11 @@ textarea:focus-visible { outline: none; }
 .option-item[aria-checked="true"] .ui-icon { visibility: visible; }
 .menu-caption { display: block; padding: 5px 10px; font-size: 11px; color: var(--ai-muted); }
 select { padding: 8px 10px; min-height: 40px; background: var(--ai-bg); border: 1px solid var(--ai-line); border-radius: 6px; max-width: 100%; }
-.scope-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 5px; padding: 5px 4px 0; border-top: 1px solid var(--ai-line); }
-.context-count { color: var(--ai-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.scope-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 5px; padding: 5px 0 0 10px; border-top: 1px solid var(--ai-line); }
+/* 底栏文字与选项文字左对齐，更新按钮的文字与勾选图标右对齐。 */
+.scope-footer .refresh-action { padding-inline: 10px; }
+.context-count { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ai-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.context-count[data-state="error"] { color: var(--danger, #c74949); }
 .history { padding: 4px; }
 .history select { width: 100%; font-size: 12px; }
 /* 导出图片：上方预览实际生成的 PNG，下方选择背景并复制或保存。 */

@@ -1,4 +1,4 @@
-import { SCOPES, EFFORTS, SUMMARY_PROMPT, topicIdFromUrl, validateConfig, isDeepSeek, selectedEffort, measureModel, collectTopic, buildMessages, streamChat, checkAbort, abortError } from './core.js';
+import { SCOPES, EFFORTS, SUMMARY_PROMPT, topicIdFromUrl, validateConfig, isDeepSeek, selectedEffort, measureModel, loadTopic, scopeContext, buildMessages, streamChat, checkAbort, abortError } from './core.js';
 import { element, aiIcon, uiIcon, renderMarkdown, htmlToText } from './render.js';
 import { SHARE_THEMES, shareCard, shareTime, renderShareImage, preparePost, postCard } from './share.js';
 import styles from './style.css';
@@ -10,8 +10,8 @@ const SIZE = { minHeight: 320, minWidth: 360, maxWidth: 900, step: 24 };
 const DEEPSEEK = { endpoint: 'https://api.deepseek.com/chat/completions', models: ['deepseek-flash', 'deepseek-v4-pro'] };
 const uuid = () => crypto.randomUUID();
 const clone = value => JSON.parse(JSON.stringify(value));
-const labels = { first: '仅首帖', '5': '前 5 帖', '10': '前 10 帖', '20': '前 20 帖', all: '全部帖子' };
-const state = { topicId: null, record: null, session: null, task: null, probe: null, config: {}, context: null, open: false, view: 'chat', popover: null };
+const labels = { first: '仅首帖', '5': '前 5 帖', all: '全部帖子' };
+const state = { topicId: null, record: null, session: null, task: null, probe: null, read: null, config: {}, open: false, view: 'chat', popover: null };
 const nodes = new Map();
 let storageNotice = '', scheduled = false, timelineButton, lastTrigger, closeTimer;
 const postMenus = new WeakMap(), revealedPostMenus = new WeakSet();
@@ -63,21 +63,22 @@ const closeButton = iconButton('关闭 AI 面板', 'close', event => closePanel(
 panel.append(element('header', { class: 'head' }, [
   element('div', { class: 'head-row' }, [element('div', { class: 'brand' }, [backButton, panelTitle]), element('div', { class: 'actions' }, [moreButton, exportButton, closeButton])]),
 ]));
-const scopeOptions = ['first', '5', '10', '20', 'all'].map(value => element('button', {
+const scopeOptions = ['first', '5', 'all'].map(value => element('button', {
   class: 'menu-item option-item', type: 'button', role: 'menuitemradio', 'aria-checked': 'false', 'data-value': value,
   onClick: () => {
     if (state.task || !state.session) return;
-    state.session.scope = value; state.context = null; persist(); refreshControls(); setStatus(''); closePopover(true);
+    state.session.scope = value; persist(); refreshControls(); setStatus(''); closePopover(true);
   },
 }, [element('span', { text: labels[value] }), uiIcon('check')]));
-const refreshButton = element('button', { class: 'quiet refresh-action', type: 'button', 'aria-label': '更新帖子上下文', onClick: () => { closePopover(); void refreshContext(); } }, [uiIcon('refresh'), element('span', { text: '更新原文' })]);
+// 浮层保持打开，底栏直接显示读取进度。
+const refreshButton = element('button', { class: 'quiet refresh-action', type: 'button', 'aria-label': '更新帖子上下文', onClick: () => { if (!state.task && !reading()) readTopic(true); } }, [uiIcon('refresh'), element('span', { text: '更新原文' })]);
 const newButton = element('button', { class: 'menu-item', type: 'button', onClick: () => {
   if (!state.record || state.task) return;
   closePopover();
   if (!state.session.messages.length) { questionInput.focus(); return; }
   const next = newSession(state.session.scope);
   state.record.sessions.unshift(next); state.record.activeId = next.id; state.session = next;
-  state.context = null; questionInput.value = ''; resizeComposer(); persist(); renderMessages(); refreshControls(); setStatus(''); questionInput.focus();
+  questionInput.value = ''; resizeComposer(); persist(); renderMessages(); refreshControls(); setStatus(''); questionInput.focus();
 } }, [uiIcon('plus'), element('span', { text: '新对话' })]);
 const historyButton = element('button', { class: 'menu-item', type: 'button', 'aria-expanded': 'false', 'aria-controls': 'conversation-history', onClick: () => {
   historyBox.hidden = !historyBox.hidden; historyButton.setAttribute('aria-expanded', String(!historyBox.hidden)); fillHistory(); if (!historyBox.hidden) historySelect.focus();
@@ -87,7 +88,7 @@ const modelMeta = element('span', { class: 'menu-model' });
 const historySelect = element('select', { 'aria-label': '选择历史对话', onChange: () => {
   const session = state.record?.sessions.find(item => item.id === historySelect.value);
   if (!session || state.task) return;
-  state.record.activeId = session.id; state.session = session; state.context = null; questionInput.value = '';
+  state.record.activeId = session.id; state.session = session; questionInput.value = '';
   resizeComposer(); persist(); renderMessages(); scrollLatest(); refreshControls(); setStatus(''); closePopover(true);
 } });
 const historyBox = element('div', { class: 'history', id: 'conversation-history', hidden: true }, [historySelect]);
@@ -450,8 +451,10 @@ function closePanel({ instant = false } = {}) {
   else { panel.removeAttribute('data-instant'); panel.setAttribute('data-closing', ''); closeTimer = setTimeout(finish, 150); }
   lastTrigger?.isConnected && lastTrigger.focus(); reconcile();
 }
+// 点 AI 按钮时开始读取全部帖子；从导出图片或油猴菜单打开面板不读取。
 function activate(event) {
   openPanel(event?.detail === 0);
+  if (state.topicId && state.read?.topicId !== state.topicId) readTopic();
 }
 // 生成过程中不自动滚动；只在打开、切换对话或点击按钮时跳到最新。
 function scrollLatest() {
@@ -513,7 +516,7 @@ function refreshControls() {
   }
   if (state.view === 'chat') panelTitle.title = state.record?.title || '';
   scopeLabel.textContent = labels[state.session?.scope || '5'];
-  contextMeta.textContent = state.context ? `${state.context.count}/${state.context.total} 帖` : '';
+  refreshReadMeta();
   modelMeta.textContent = state.config.model || '';
   fillHistory();
 }
@@ -695,19 +698,50 @@ async function getJson(path, signal) {
   return response.json();
 }
 
-async function refreshContext() {
-  if (state.task || !state.topicId) return;
-  const task = { topicId: state.topicId, session: state.session, record: state.record, controller: new AbortController() };
-  state.task = task; state.context = null; refreshControls(); setStatus('正在读取…');
-  try {
-    const context = await collectTopic({ topicId: task.topicId, scope: task.session.scope, getJson, toText: htmlToText, signal: task.controller.signal,
-      onProgress: (loaded, total) => { if (state.task === task) setStatus(`正在读取 ${loaded}/${total} 帖…`); } });
-    if (state.task !== task || topicIdFromUrl(location.href) !== task.topicId) return;
-    state.context = context; state.record.title = context.title; persist();
-    setStatus(`已读取 ${context.count}/${context.total} 帖`);
-  } catch (error) {
-    if (state.task === task) setStatus(error.name === 'AbortError' ? '已停止读取。' : error.message, error.name !== 'AbortError');
-  } finally { if (state.task === task) { state.task = null; refreshControls(); } }
+// 后台读取全部帖子，三档范围都从这一份截取。只读论坛、不调用模型，也不占用输入框；关闭面板后继续读。
+function readTopic(force = false) {
+  if (!state.topicId) return null;
+  if (state.read?.topicId === state.topicId && !force) return state.read;
+  state.read?.controller.abort();
+  const read = { topicId: state.topicId, controller: new AbortController(), data: null, error: null, done: false, waiters: new Set() };
+  const notify = () => {
+    for (const resolve of read.waiters) resolve();
+    read.waiters.clear();
+    if (state.read === read) refreshReadMeta();
+  };
+  state.read = read;
+  loadTopic({ topicId: read.topicId, getJson, toText: htmlToText, signal: read.controller.signal, onProgress: data => { read.data = data; notify(); } })
+    .catch(error => { read.error = error; })
+    .finally(() => { read.done = true; notify(); });
+  refreshReadMeta();
+  return read;
+}
+function reading() { return state.read?.topicId === state.topicId && !state.read.done; }
+function refreshReadMeta() {
+  const read = state.read?.topicId === state.topicId ? state.read : null;
+  const data = read?.data, failed = read?.done && read.error && read.error.name !== 'AbortError';
+  const [text, kind, title] = !read || (read.done && !failed && !data?.done) ? ['尚未读取', 'idle', '']
+    : failed ? ['读取失败', 'error', read.error.message]
+    : !read.done ? [data ? `读取中 ${data.posts.size}/${data.ids.length}` : '读取中…', 'loading', '']
+    : data.overflow ? ['全文超 12 万字', 'overflow', `已读 ${data.posts.size}/${data.ids.length} 帖。全文超过 12 万字，“全部帖子”无法发送，可选前 5 帖或仅首帖。`]
+    : [`已读 ${data.posts.size}/${data.ids.length} 帖`, 'ready', ''];
+  contextMeta.textContent = text; contextMeta.dataset.state = kind; contextMeta.title = title;
+}
+// 发送时从预读结果截取所选范围：首帖和前 5 帖在第一次请求后就能用；还没读到就等这次读取，
+// 之前读取失败则由这次发送重新读一次，不会自动重试。
+async function contextFor(task, current) {
+  const signal = task.controller.signal;
+  const stopped = new Promise((_, reject) => signal.addEventListener('abort', () => reject(abortError()), { once: true }));
+  stopped.catch(() => {});
+  let read = state.read?.topicId === task.topicId && !(state.read.done && state.read.error) ? state.read : readTopic(true);
+  for (;;) {
+    checkAbort(signal);
+    const context = read.data && scopeContext(read.data, task.session.scope);
+    if (context) return context;
+    if (read.done) throw read.error || new Error('没有取得帖子内容，请稍后重试。');
+    if (current()) setStatus(read.data ? `正在读取 ${read.data.posts.size}/${read.data.ids.length} 帖…` : '正在读取帖子…');
+    await Promise.race([new Promise(resolve => read.waiters.add(resolve)), stopped]);
+  }
 }
 
 async function send(rawQuestion, replaceLast = false) {
@@ -723,15 +757,10 @@ async function send(rawQuestion, replaceLast = false) {
   let answer, thinkStart = 0;
   const saveSoon = () => { if (Date.now() - task.lastSave > 1200) { task.lastSave = Date.now(); persist(task.record, task.topicId); } };
   try {
-    setStatus('正在读取帖子…');
-    let context = state.context;
-    if (!context || context.scope !== task.session.scope || context.topicId !== task.topicId) {
-      context = await collectTopic({ topicId: task.topicId, scope: task.session.scope, getJson, toText: htmlToText, signal: task.controller.signal,
-        onProgress: (loaded, total) => { if (current()) setStatus(`正在读取 ${loaded}/${total} 帖…`); } });
-    }
+    const context = await contextFor(task, current);
     checkAbort(task.controller.signal);
     if (!current()) return;
-    state.context = context; task.record.title = context.title;
+    task.record.title = context.title;
     const history = replaceLast ? task.session.messages.slice(0, -2) : task.session.messages;
     const messages = buildMessages(context, history, question);
     if (replaceLast) task.session.messages.splice(-2);
@@ -855,12 +884,13 @@ function reconcile() {
   const id = topicIdFromUrl(location.href);
   if (id !== state.topicId) {
     resetPostMenus();
-    state.task?.controller.abort(); cancelProbe(); testResult.hidden = true; state.task = null; state.context = null; state.topicId = id;
+    state.task?.controller.abort(); state.read?.controller.abort(); cancelProbe(); testResult.hidden = true; state.task = null; state.read = null; state.topicId = id;
     if (state.view === 'export') setView('chat');
     questionInput.value = ''; resizeComposer(); closePopover(); nodes.clear();
     if (id) {
       state.record = loadRecord(id); state.session = state.record.sessions.find(s => s.id === state.record.activeId);
       renderMessages(); scrollLatest(); refreshControls(); setStatus('');
+      if (state.open) readTopic();
     } else { state.record = null; state.session = null; state.open = false; }
     panel.hidden = !state.open || !id;
   }
