@@ -1,6 +1,6 @@
 import { SCOPES, EFFORTS, SUMMARY_PROMPT, topicIdFromUrl, validateConfig, isDeepSeek, selectedEffort, measureModel, loadTopic, scopeContext, buildMessages, streamChat, checkAbort, abortError } from './core.js';
 import { element, aiIcon, uiIcon, renderMarkdown, htmlToText } from './render.js';
-import { SHARE_THEMES, shareCard, shareTime, renderShareImage, preparePost, postCard } from './share.js';
+import { SHARE_THEMES, shareCard, shareTime, renderShareImage, preparePost, postCard, measurePost } from './share.js';
 import styles from './style.css';
 
 const PREFIX = 'linuxdo-ai:v1:';
@@ -13,7 +13,7 @@ const clone = value => JSON.parse(JSON.stringify(value));
 const labels = { first: '仅首帖', '5': '前 5 帖', all: '全部帖子' };
 const state = { topicId: null, record: null, session: null, task: null, probe: null, read: null, config: {}, open: false, view: 'chat', popover: null };
 const nodes = new Map();
-let storageNotice = '', scheduled = false, timelineButton, lastTrigger, closeTimer;
+let storageNotice = '', scheduled = false, timelineButton, lastTrigger, closeTimer, chatScroll = null;
 const postMenus = new WeakMap(), revealedPostMenus = new WeakSet();
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
 
@@ -135,15 +135,19 @@ const composer = element('form', { class: 'composer', onSubmit: event => { event
   ])]),
 ]);
 // source 为 null 时导出当前对话，为 { postId } 时导出该楼；post 缓存已内联图片的帖子，切换背景不重新下载。
-const shot = { theme: null, blob: null, token: 0, source: null, post: null, controller: null };
+// full 为 true 时长帖导出完整长图，默认只保留开头。
+const shot = { theme: null, blob: null, token: 0, source: null, post: null, controller: null, full: false };
 const exportPreview = element('div', { class: 'export-preview', 'aria-busy': 'false' });
+const lengthText = element('span');
+const lengthButton = element('button', { type: 'button', class: 'quiet', onClick: () => { shot.full = !shot.full; void drawExport(); } });
+const exportNote = element('div', { class: 'export-note', role: 'status', hidden: true }, [lengthText, lengthButton]);
 const exportThemes = Object.entries(SHARE_THEMES).map(([value, theme]) => element('button', {
   type: 'button', class: 'quiet theme-option', 'aria-pressed': 'false', 'data-value': value,
   onClick: () => { if (shot.theme !== value) { shot.theme = value; void drawExport(); } },
 }, [element('i', { class: 'swatch', style: `background: ${theme.bg}` }), element('span', { text: theme.label })]));
 const copyImageButton = element('button', { type: 'button', class: 'quiet', text: '复制图片', onClick: () => void copyExport() });
 const saveImageButton = element('button', { type: 'button', class: 'primary', text: '保存图片', onClick: saveExport });
-const exporter = element('section', { class: 'exporter', 'aria-label': '导出图片', hidden: true }, [exportPreview,
+const exporter = element('section', { class: 'exporter', 'aria-label': '导出图片', hidden: true }, [exportNote, exportPreview,
   element('div', { class: 'export-bar' }, [
     element('div', { class: 'export-themes', role: 'group', 'aria-label': '图片背景' }, exportThemes),
     element('div', { class: 'actions export-actions' }, [copyImageButton, saveImageButton]),
@@ -357,7 +361,10 @@ async function testModel() {
 
 function resizeComposer() {
   questionInput.style.height = 'auto';
-  questionInput.style.height = `${Math.min(160, Math.max(40, questionInput.scrollHeight))}px`;
+  const full = questionInput.scrollHeight;
+  questionInput.style.height = `${Math.min(160, Math.max(40, full))}px`;
+  // 高度取整会少零点几像素，Windows 会因此露出带箭头的滚动条；没撑到上限时内容已完整显示，不需要滚动。
+  questionInput.style.overflowY = full > 160 ? 'auto' : 'hidden';
   const height = composer.getBoundingClientRect().height;
   if (height) panel.style.setProperty('--ai-composer-height', `${height}px`);
 }
@@ -405,6 +412,8 @@ function setStatus(text, error = false) {
 function setView(view) {
   if (view !== 'chat' && state.task) return;
   if (view === 'export' && !shot.source && !exportMessages().length) return;
+  if (view !== 'chat') rememberScroll();
+  const returning = view === 'chat' && state.view !== 'chat';
   cancelProbe(); testResult.hidden = true; clearExport();
   if (view !== 'export') shot.source = null;
   state.view = view;
@@ -425,20 +434,21 @@ function setView(view) {
     endpointInput.value = state.config.endpoint || ''; keyInput.value = state.config.key || ''; modelInput.value = state.config.model || '';
     deepseekModel.value = DEEPSEEK.models.includes(state.config.model) ? state.config.model : state.config.model && savedProvider() === 'deepseek' ? 'custom' : DEEPSEEK.models[0];
     showProviderFields(); keyInput.focus();
-  } else { keyInput.value = ''; if (state.open) questionInput.focus(); resizeComposer(); scrollLatest(); }
+  } else { keyInput.value = ''; if (state.open) questionInput.focus(); resizeComposer(); if (returning) restoreScroll(); }
 }
 function openPanel(instant = false) {
   if (!state.topicId) return;
-  const closing = panel.hasAttribute('data-closing');
+  const closing = panel.hasAttribute('data-closing'), reopening = !state.open;
   clearTimeout(closeTimer); panel.removeAttribute('data-closing'); panel.toggleAttribute('data-instant', instant);
   lastTrigger = document.activeElement; state.open = true; panel.hidden = false; launcher.hidden = true;
   if (closing && state.view !== 'chat') setView('chat');
   timelineButton?.setAttribute('aria-expanded', 'true'); launcher.setAttribute('aria-expanded', 'true');
-  applyLayout(); refreshControls(); resizeComposer(); scrollLatest(); panel.focus();
+  applyLayout(); refreshControls(); resizeComposer(); if (reopening) restoreScroll(); panel.focus();
 }
 // 点击关闭时淡出 150ms；Esc、键盘操作和减弱动态效果时立即隐藏。
 // 关闭只隐藏面板，读取和生成在后台继续，重新打开即可看到进度；需要中断时用停止按钮。
 function closePanel({ instant = false } = {}) {
+  rememberScroll();
   cancelProbe(); state.open = false; keyInput.value = '';
   closePopover();
   const finish = () => {
@@ -456,9 +466,17 @@ function activate(event) {
   openPanel(event?.detail === 0);
   if (state.topicId && state.read?.topicId !== state.topicId) readTopic();
 }
-// 生成过程中不自动滚动；只在打开、切换对话或点击按钮时跳到最新。
+// 生成过程中不自动滚动；只在切换话题、切换对话或点击按钮时跳到最新。
 function scrollLatest() {
   conversation.scrollTop = conversation.scrollHeight; updateLatest();
+}
+// 面板隐藏后浏览器会丢掉滚动位置：关闭面板或切到设置、导出前记下，回到同一对话时恢复，其余情况跳到最新。
+function rememberScroll() {
+  if (state.open && state.view === 'chat' && state.session && conversation.clientHeight) chatScroll = { sessionId: state.session.id, top: conversation.scrollTop };
+}
+function restoreScroll() {
+  if (chatScroll && chatScroll.sessionId === state.session?.id) { conversation.scrollTop = chatScroll.top; updateLatest(); }
+  else scrollLatest();
 }
 function updateLatest() {
   latestButton.hidden = !state.open || state.view !== 'chat' || conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight < 24;
@@ -604,8 +622,17 @@ function pageIsDark() {
   return r * 0.299 + g * 0.587 + b * 0.114 < 128;
 }
 function clearExport() {
-  shot.token++; shot.blob = null; shot.post = null; shot.controller?.abort(); shot.controller = null;
-  exportPreview.replaceChildren(); exportPreview.setAttribute('aria-busy', 'false');
+  shot.token++; shot.blob = null; shot.post = null; shot.full = false; shot.controller?.abort(); shot.controller = null;
+  exportPreview.replaceChildren(); exportPreview.setAttribute('aria-busy', 'false'); exportNote.hidden = true;
+}
+// 只有长帖显示：默认只保留开头，可改为完整长图；完整长图超出单张图片上限时不再提供切换。
+function showLength() {
+  const post = shot.source ? shot.post : null;
+  exportNote.hidden = !post?.brief;
+  if (exportNote.hidden) return;
+  lengthButton.hidden = post.tooTall;
+  lengthText.textContent = post.tooTall ? '帖子超出单张图片的长度上限，只能保留开头。' : shot.full ? '完整长图很长，部分应用会压缩显示。' : '帖子较长，图片只保留开头。';
+  lengthButton.textContent = shot.full ? '只保留开头' : '导出完整长图';
 }
 // 同站或带 CORS 的图片直接读取；其余经 GM_xmlhttpRequest（首次访问新域名时油猴会询问是否允许）。
 async function fetchImage(url, signal) {
@@ -635,7 +662,10 @@ async function loadPost(postId, signal) {
   setStatus('正在读取帖子…');
   const json = await getJson(`/posts/${postId}.json`, signal);
   if (String(json.topic_id) !== String(state.topicId)) throw new Error('这一楼不属于当前话题，请刷新页面后重试。');
-  const post = await preparePost(json, { fetchImage: url => fetchImage(url, signal),
+  // 单帖接口不带话题标题，取页面标题；标题里的 emoji 与正文图片一起画进图里。
+  const heading = document.querySelector(`#topic-title h1[data-topic-id="${CSS.escape(state.topicId)}"] .fancy-title`);
+  const read = state.read?.topicId === state.topicId ? state.read.data : null;
+  const post = await preparePost(json, { fetchImage: url => fetchImage(url, signal), title: state.record?.title || read?.title || '', titleHtml: heading?.innerHTML || '',
     onProgress: (loaded, total) => { if (!signal.aborted) setStatus(`正在加载图片 ${loaded}/${total}…`); } });
   checkAbort(signal);
   setStatus('');
@@ -647,7 +677,10 @@ async function exportCard() {
       shot.controller = new AbortController();
       shot.post = { postId: shot.source.postId, ready: loadPost(shot.source.postId, shot.controller.signal) };
     }
-    return postCard(await shot.post.ready, shot.theme);
+    const post = await shot.post.ready;
+    if (!('brief' in shot.post)) shot.post.brief = measurePost(post);
+    showLength();
+    return postCard(post, shot.theme, shot.full ? null : shot.post.brief);
   }
   const messages = exportMessages();
   return shareCard({ title: state.record?.title, topicId: state.topicId, theme: shot.theme, time: shareTime(messages.at(-1)?.createdAt),
@@ -667,7 +700,10 @@ async function drawExport() {
     exportPreview.replaceChildren(canvas); shot.blob = blob;
     copyImageButton.disabled = saveImageButton.disabled = false;
   } catch (error) {
-    if (token === shot.token && error.name !== 'AbortError') setStatus(error.message || '图片生成失败，请重试。', true);
+    if (token !== shot.token || error.name === 'AbortError') return;
+    // 完整长图画不下时退回只保留开头。
+    if (error.code === 'too-tall' && shot.source && shot.full && shot.post?.brief) { shot.post.tooTall = true; shot.full = false; void drawExport(); return; }
+    setStatus(error.code === 'too-tall' && !shot.source ? '对话太长，无法生成一张图片。请新建对话后分开导出。' : error.message || '图片生成失败，请重试。', true);
   } finally { if (token === shot.token) exportPreview.setAttribute('aria-busy', 'false'); }
 }
 async function copyExport() {
@@ -767,7 +803,8 @@ async function send(rawQuestion, replaceLast = false) {
     const ask = { id: uuid(), role: 'user', content: question, status: 'complete', createdAt: Date.now() };
     answer = { id: uuid(), role: 'assistant', content: '', status: 'generating', model: config.model, createdAt: Date.now() };
     task.session.messages.push(ask, answer); questionInput.value = ''; resizeComposer(); renderMessages(); refreshControls(); persist(task.record, task.topicId);
-    pinQuestion(nodes.get(ask.id).article, nodes.get(answer.id).article);
+    // 面板关着时问题没法置顶，重新打开改为跳到最新，看到这次的问题。
+    pinQuestion(nodes.get(ask.id).article, nodes.get(answer.id).article); chatScroll = null;
     // 定位完成后再加入场动画，避免位移影响置顶计算。
     for (const id of [ask.id, answer.id]) nodes.get(id).article.classList.add('enter');
     setStatus(`已读取 ${context.count}/${context.total} 帖，正在生成…`);
@@ -886,7 +923,7 @@ function reconcile() {
     resetPostMenus();
     state.task?.controller.abort(); state.read?.controller.abort(); cancelProbe(); testResult.hidden = true; state.task = null; state.read = null; state.topicId = id;
     if (state.view === 'export') setView('chat');
-    questionInput.value = ''; resizeComposer(); closePopover(); nodes.clear();
+    questionInput.value = ''; resizeComposer(); closePopover(); nodes.clear(); chatScroll = null;
     if (id) {
       state.record = loadRecord(id); state.session = state.record.sessions.find(s => s.id === state.record.activeId);
       renderMessages(); scrollLatest(); refreshControls(); setStatus('');

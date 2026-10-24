@@ -46,6 +46,8 @@
 <table><thead><tr><th>指标</th><th>数值</th></tr></thead><tbody><tr><td>吐字速度</td><td>230 tps</td></tr></tbody></table>
 <p><span class="spoiler">隐藏内容</span> <a class="mention" href="/u/test">@test</a></p>
 <script>window.fixturePostXss = 1</script><img src="javascript:window.fixturePostXss=3" onerror="window.fixturePostXss = 2"><iframe src="https://example.com"></iframe>`;
+  // 长帖：每段约三行，第 15 段后插一张截图；huge 超出单张图片的长度上限。
+  const longCooked = count => Array.from({ length: count }, (_, i) => `<p>第 ${i + 1} 段：长帖分享图验收文字，检查只保留开头时的截断位置、渐隐和全文篇幅提示是否清楚。</p>${i === 14 ? '<p><img src="/fixture-image/long/shot.png" width="690" height="388"></p>' : ''}`).join('');
   const nativeFetch = window.fetch.bind(window);
   window.fetch = async (path, options) => {
     const href = typeof path === 'string' ? path : path instanceof URL ? path.href : '';
@@ -56,9 +58,10 @@
       if (mode === 'forum-error') return new Response('<html>verification</html>', { status: 403 });
       const id = Number(path.match(/\/posts\/(\d+)\.json/)?.[1]);
       const topic = location.pathname.split('/')[3] || '1001';
-      return json({ id, post_number: id > 100 ? id - 96 : id, topic_id: Number(topic), topic_slug: 'topic', topic_title: isPreview ? previewTitle : '长帖阅读验收：47 篇帖子，分批补齐',
+      // 与真实 Discourse 一致：单帖接口不返回 topic_title。
+      return json({ id, post_number: id > 100 ? id - 96 : id, topic_id: Number(topic), topic_slug: 'topic',
         username: `测试_${id}`, name: id === 1 ? '测试楼主' : '测试回复者', avatar_template: '/fixture-image/avatar/{size}.png', created_at: '2026-10-20T07:30:00.000Z',
-        cooked: id === 2 ? postCooked(topic) : post(id, topic).cooked });
+        cooked: mode === 'long-post' ? longCooked(60) : mode === 'huge-post' ? longCooked(800) : id === 2 ? postCooked(topic) : post(id, topic).cooked });
     }
     if (typeof path !== 'string' || !path.startsWith('/t/')) return nativeFetch(path, options);
     if (options.signal?.aborted) throw new DOMException('stopped', 'AbortError');

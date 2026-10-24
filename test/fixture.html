@@ -39,7 +39,7 @@
   <div class="fixture-notice">本地验收用例：模拟帖子与模型响应，不连接外部 API。</div>
   <header><strong>LINUX DO</strong><button id="go-first">话题一</button><button id="go-second">话题二</button><button id="theme-toggle">切换明暗</button></header>
   <div class="shell"><nav>话题<br>开发调优<br>资源荟萃<br>文档共建</nav><main>
-    <div id="topic-title"><div class="title-wrapper"><h1 data-topic-id="1001"><a class="fancy-title">长帖阅读验收：47 篇帖子，分批补齐</a></h1><span class="category">开发调优 · 本地测试</span></div></div>
+    <div id="topic-title"><div class="title-wrapper"><h1 data-topic-id="1001"><a class="fancy-title"><span dir="auto">长帖阅读验收：47 篇帖子，分批补齐 <img src="/fixture-image/emoji/fire.png" class="emoji" alt=":fire:" title=":fire:" width="20" height="20"></span></a></h1><span class="category">开发调优 · 本地测试</span></div></div>
     <article><small>测试楼主 · #1</small><p>这是一份明确标注的测试材料，用于检查总结是否覆盖所选楼层。</p><p>按钮应跟随话题切换。长帖通过 JSON 按需读取，不依赖屏幕上已经渲染多少回复。</p><p>先生成总结，再追问“补充第 21 楼”，检查传入模型的上下文和历史。</p></article>
     <article><small>测试回复 · #2</small><p>流式验收包含中文、表格、代码块和超链接。关闭面板、切换话题或点击停止时，旧请求不得写入新对话。</p></article>
     <article><small>测试回复 · #3</small><p>刷新后，模型设置与当前话题的对话应该恢复。历史记录中的旧对话也仍可打开。</p></article>

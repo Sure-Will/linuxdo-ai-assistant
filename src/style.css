@@ -100,7 +100,7 @@ th { background: var(--ai-soft); }
 .composer { flex: none; padding: 0 16px 14px; }
 .composer-box { padding: 6px; border: 1px solid var(--ai-line); border-radius: 12px; background: var(--ai-soft); }
 textarea, input { display: block; width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--ai-line); background: var(--ai-bg); }
-textarea { min-height: 40px; max-height: 160px; padding: 9px 10px; resize: none; line-height: 1.6; border: 0; background: transparent; }
+textarea { min-height: 40px; max-height: 160px; padding: 9px 10px; resize: none; line-height: 1.6; border: 0; background: transparent; overflow-y: hidden; scrollbar-width: thin; }
 .composer-box:has(textarea:focus-visible) { border-color: var(--ai-muted); }
 textarea:focus-visible { outline: none; }
 .composer-actions { justify-content: space-between; padding: 10px 2px 2px; }
@@ -151,6 +151,9 @@ select { padding: 8px 10px; min-height: 40px; background: var(--ai-bg); border: 
 .export-preview { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 8px 16px 16px; }
 .export-preview canvas { display: block; width: min(100%, 375px); height: auto; margin: 0 auto; border-radius: 12px; box-shadow: 0 0 0 1px var(--ai-hairline), 0 4px 20px #0000001a; }
 .export-preview[aria-busy="true"] canvas { opacity: .55; }
+/* 长帖提示：说明当前只保留开头还是完整长图，并提供切换。 */
+.export-note { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 16px 8px; padding: 2px 2px 2px 12px; border-radius: 8px; background: var(--ai-soft); font-size: 12px; color: var(--ai-muted); }
+.export-note button { flex: none; min-height: 32px; padding: 6px 10px; font-size: 12px; color: var(--ai-accent); white-space: nowrap; }
 .export-bar { flex: none; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 16px 14px; border-top: 1px solid var(--ai-line); }
 .export-themes { display: flex; gap: 2px; }
 .theme-option { display: flex; align-items: center; gap: 6px; padding: 8px 10px; font-size: 12px; color: var(--ai-muted); }

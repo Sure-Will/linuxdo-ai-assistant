@@ -16,6 +16,12 @@ export async function startServer(port = 0) {
       response.end(JSON.stringify({ stamp, baseline: await fs.access(path.join(base, BASELINE)).then(() => true, () => false) }));
       return;
     }
+    // 页面自身显示的 emoji 占位图；脚本读取图片时由夹具拦截，不经过这里。
+    if (route.startsWith('/fixture-image/')) {
+      response.writeHead(200, { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'no-store' });
+      response.end('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><circle cx="10" cy="10" r="9" fill="#f5b400"/></svg>');
+      return;
+    }
     const file = route === '/preview' || route === '/' ? 'test/preview.html'
       : route === '/preview-fixture.js' ? 'test/preview-fixture.js'
       : route === '/fixture.js' ? 'test/fixture.js' : route === '/linuxdo-ai.user.js' ? 'dist/linuxdo-ai.user.js'

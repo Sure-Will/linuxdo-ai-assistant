@@ -56,6 +56,20 @@ async function configure(page) {
   await page.getByRole('button', { name: '保存', exact: true }).click();
 }
 async function done(page) { await page.locator('#linuxdo-ai-root .panel[aria-busy="false"] .message.assistant[data-status="complete"]').last().waitFor(); }
+// 记录分享卡片序列化后的 HTML，用来检查画进图里的标题、楼层和截断提示。
+async function captureShare(page) {
+  await page.evaluate(() => {
+    const serialize = XMLSerializer.prototype.serializeToString;
+    window.shareMarkup = [];
+    XMLSerializer.prototype.serializeToString = function (node) { const markup = serialize.call(this, node); if (node.classList?.contains('share-card')) window.shareMarkup.push(markup); return markup; };
+  });
+}
+const lastShare = page => page.evaluate(() => {
+  const card = new DOMParser().parseFromString(window.shareMarkup.at(-1), 'text/html').body.firstElementChild;
+  const text = selector => card.querySelector(selector)?.textContent.trim() ?? null;
+  return { title: text('.share-title'), titleEmoji: card.querySelector('.share-title img.share-emoji')?.getAttribute('src')?.slice(0, 15) ?? null,
+    floor: text('.share-floor'), foot: text('.share-foot'), clip: card.querySelector('.share-clip')?.style.height ?? null, more: text('.share-more') };
+});
 const summary = page => page.getByRole('button', { name: '总结这个话题', exact: true });
 const input = page => page.getByRole('textbox', { name: '向 AI 提问', exact: true });
 
@@ -507,6 +521,7 @@ test('帖子操作栏在窄屏原位换行，无权限的按钮不补造', async
 
 test('每楼常驻图片按钮可直接导出，重绘后补回，导出时图片转进图里且不执行帖子脚本', async t => {
   const page = await setup(t, undefined, { settings: false });
+  await captureShare(page);
   const exports = page.locator('main .post-action-menu__copy-link + .linuxdo-ai-post-export');
   await exports.nth(2).waitFor();
   assert.equal(await page.locator('main .linuxdo-ai-post-export').count(), 3, '每楼一个且不重复');
@@ -529,6 +544,14 @@ test('每楼常驻图片按钮可直接导出，重绘后补回，导出时图�
   assert.equal(await page.locator('#linuxdo-ai-root .status').isVisible(), false, '单张图片失败不阻止导出');
   const height = await canvas.evaluate(node => node.height);
   assert.ok(height > 1400, `图片与正文已排入卡片（高 ${height}px）`);
+  const card = await lastShare(page);
+  assert.equal(card.title, '长帖阅读验收：47 篇帖子，分批补齐', '单帖接口不带标题时使用页面标题');
+  assert.equal(card.titleEmoji, 'data:image/png;', '标题里的 emoji 画进图里');
+  assert.ok((await page.evaluate(() => fixture.imageRequests)).some(url => url.includes('/fixture-image/emoji/fire.png')));
+  assert.equal(card.floor, '#2', '楼层号在作者行');
+  assert.equal(card.foot, 'https://linux.do/t/topic/1001/2', '底部只保留链接');
+  assert.equal(card.clip, null, '普通长度的帖子完整导出');
+  assert.equal(await page.locator('#linuxdo-ai-root .export-note').isVisible(), false);
   for (const [label, file] of [['浅色', 'post-export-light.png'], ['深色', 'post-export-dark.png']]) {
     await page.getByRole('button', { name: label, exact: true }).click();
     await page.locator(`#linuxdo-ai-root .export-preview[aria-busy="false"] canvas[aria-label*="${label}"]`).waitFor();
@@ -543,6 +566,72 @@ test('每楼常驻图片按钮可直接导出，重绘后补回，导出时图�
   await page.locator('#linuxdo-ai-root .status.error').filter({ hasText: '重新登录或验证' }).waitFor();
   assert.equal(await page.locator('#linuxdo-ai-root .export-preview canvas').count(), 0);
   assert.equal(await page.evaluate(() => fixture.requests.length), 0, '导出帖子不请求模型');
+});
+
+test('长帖分享图默认只保留开头，可切换完整长图，超出单张上限时退回开头', async t => {
+  const page = await setup(t, undefined, { settings: false });
+  await captureShare(page);
+  await page.evaluate(() => fixture.setMode('long-post'));
+  await page.getByRole('button', { name: '关闭 AI 面板', exact: true }).click();
+  await page.locator('main .linuxdo-ai-post-export').first().click();
+  const canvas = page.locator('#linuxdo-ai-root .export-preview[aria-busy="false"] canvas');
+  const note = page.locator('#linuxdo-ai-root .export-note');
+  await canvas.waitFor();
+  assert.equal(await note.locator('span').innerText(), '帖子较长，图片只保留开头。');
+  const brief = await lastShare(page);
+  assert.match(brief.more, /^仅展示开头 · 全文约 [\d,]+ 字、1 张图$/);
+  const cut = parseInt(brief.clip, 10);
+  assert.ok(Math.abs(cut - 1200) <= 240, `截断在约 1200px 处（实际 ${cut}px）`);
+  const briefHeight = await canvas.evaluate(node => node.height);
+  assert.ok(briefHeight < 2 * 1700, `只保留开头的图片高度适中（${briefHeight}px）`);
+  const [briefFile] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: '保存图片', exact: true }).click()]);
+  await briefFile.saveAs(path.join(resultsDir, 'post-long-brief.png'));
+  await page.getByRole('button', { name: '导出完整长图', exact: true }).click();
+  await page.waitForFunction(min => {
+    const node = document.querySelector('#linuxdo-ai-root').shadowRoot.querySelector('.export-preview[aria-busy="false"] canvas');
+    return node && node.height > min;
+  }, briefHeight * 2);
+  assert.equal((await lastShare(page)).clip, null, '完整长图不截断');
+  assert.equal(await note.locator('span').innerText(), '完整长图很长，部分应用会压缩显示。');
+  await page.getByRole('button', { name: '只保留开头', exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => fixture.calls.filter(path => path.startsWith('/posts/')).length), 1, '切换长度不重新读取帖子');
+  await page.evaluate(() => fixture.setMode('huge-post'));
+  await page.getByRole('button', { name: '关闭 AI 面板', exact: true }).click();
+  await page.locator('main .linuxdo-ai-post-export').nth(1).click();
+  await note.filter({ hasText: '图片只保留开头' }).waitFor();
+  await page.getByRole('button', { name: '导出完整长图', exact: true }).click();
+  await note.filter({ hasText: '超出单张图片的长度上限' }).waitFor();
+  await canvas.waitFor();
+  assert.ok((await lastShare(page)).clip, '画不下完整长图时退回开头');
+  assert.equal(await note.locator('button').isVisible(), false, '不再提供完整长图');
+  assert.equal(await page.locator('#linuxdo-ai-root .status').isVisible(), false, '退回开头不显示错误');
+});
+
+test('关闭再打开面板、从设置或导出页返回时停在原来的阅读位置', async t => {
+  const page = await setup(t); await configure(page); await page.evaluate(() => fixture.setMode('long'));
+  await summary(page).click(); await done(page);
+  const scroll = page.locator('#linuxdo-ai-root .conversation');
+  const top = () => scroll.evaluate(el => el.scrollTop);
+  await scroll.evaluate(el => { el.scrollTop = 300; el.dispatchEvent(new Event('scroll')); });
+  await page.getByRole('button', { name: '关闭 AI 面板', exact: true }).click();
+  await page.locator('#linuxdo-ai-topic-button').click();
+  assert.equal(await top(), 300, '重新打开停在关闭前的位置');
+  assert.equal(await page.getByRole('button', { name: '回到最新', exact: true }).isVisible(), true);
+  await page.getByRole('button', { name: '导出图片', exact: true }).click();
+  await page.getByRole('button', { name: '返回对话', exact: true }).click();
+  assert.equal(await top(), 300, '从导出页返回停在原位置');
+  await openSettings(page); await page.keyboard.press('Escape');
+  assert.equal(await top(), 300, '从设置返回停在原位置');
+  await page.keyboard.press('Escape');
+  await page.locator('#linuxdo-ai-topic-button').click();
+  assert.equal(await top(), 300, 'Esc 关闭后重新打开也停在原位置');
+  await page.getByRole('button', { name: '回到最新', exact: true }).click();
+  const latest = await top();
+  await page.getByRole('button', { name: '关闭 AI 面板', exact: true }).click();
+  await page.getByRole('button', { name: '话题二', exact: true }).click();
+  await page.getByRole('button', { name: '话题一', exact: true }).click();
+  await page.locator('#linuxdo-ai-topic-button').click();
+  assert.ok(Math.abs(await top() - latest) <= 1, '切换话题后从最新开始');
 });
 
 test('论坛验证和模型网络错误不会触发自动重试', async t => {
@@ -617,6 +706,11 @@ test('窗口变宽后输入框按新宽度恢复高度', async t => {
   await page.setViewportSize({ width: 1440, height: 960 });
   await page.waitForFunction(() => document.querySelector('#linuxdo-ai-root').shadowRoot.querySelector('textarea').getBoundingClientRect().height < 50);
   assert.equal(Math.round(await height()), 40);
+  const overflow = () => input(page).evaluate(el => getComputedStyle(el).overflowY);
+  assert.equal(await overflow(), 'hidden', '未撑到上限时不显示滚动条');
+  await input(page).fill(Array.from({ length: 12 }, (_, i) => `第 ${i + 1} 行`).join('\n'));
+  assert.equal(Math.round(await height()), 160);
+  assert.equal(await overflow(), 'auto', '超过上限后才可滚动');
 });
 
 test('生成中不自动滚动，阅读位置不被拉动，回到最新只跳一次', async t => {

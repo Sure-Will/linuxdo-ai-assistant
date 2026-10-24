@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linux.do AI 阅读助手
 // @namespace    sure.linuxdo.ai
-// @version      0.1.15
+// @version      0.1.16
 // @description  自选模型，流式总结、连续追问、上下文范围和本地历史。适用于 Chrome 标签页与 PWA。
 // @author       Sure
 // @homepageURL  https://github.com/Sure-Will/linuxdo-ai-assistant
@@ -563,6 +563,9 @@ const SHARE_THEMES = Object.freeze({
   dark: { label: '深色', bg: '#1e1e1e', card: '#2d2d2d', fg: '#ffffff', accent: '#8ab4f8' },
 });
 const WIDTH = 375, SCALE = 2, MAX_CANVAS = 32_000;
+// 长帖：正文超过约 3.5 屏手机高度时默认只保留开头约 1.8 屏，在附近的段落或图片结尾截断。
+const LONG_POST = 2400;
+const BRIEF_POST = 1200, CUT_RANGE = 240;
 const mix = percent => `color-mix(in srgb, var(--fg) ${percent}%, transparent)`;
 const shareStyles = `
 .share-card { width: ${WIDTH}px; padding: 20px; background: var(--bg); color: ${mix(85)}; font: 14px/1.6 -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif; -webkit-font-smoothing: antialiased; }
@@ -573,6 +576,8 @@ const shareStyles = `
 .share-brand { font-size: 16px; font-weight: 600; color: ${mix(80)}; }
 .share-badge { margin-left: auto; display: flex; align-items: center; gap: 4px; font-size: 12px; color: ${mix(50)}; }
 .share-title { margin: 16px 0 12px; font-size: 16px; font-weight: 600; line-height: 1.4; color: ${mix(90)}; overflow-wrap: anywhere; }
+.share-head + :not(.share-title) { margin-top: 16px; }
+.share-card .share-emoji { display: inline; width: 1.25em; height: 1.25em; margin: 0 1px; vertical-align: -0.25em; }
 .share-rule { height: 1px; background: ${mix(10)}; }
 .share-messages { padding: 12px 0 16px; }
 .share-message + .share-message { margin-top: 12px; }
@@ -599,12 +604,15 @@ const shareStyles = `
 .share-author { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
 .share-avatar { flex: none; width: 36px; height: 36px; border-radius: 50%; box-shadow: 0 0 0 1px ${mix(10)}; }
 .share-avatar.fallback { display: grid; place-items: center; background: ${mix(12)}; color: ${mix(70)}; font-size: 15px; font-weight: 600; }
-.share-author-text { min-width: 0; line-height: 1.45; }
+.share-author-text { flex: 1; min-width: 0; line-height: 1.45; }
+.share-floor { flex: none; align-self: flex-start; margin-top: 2px; padding: 1px 6px; border-radius: 4px; background: ${mix(7)}; color: ${mix(60)}; font-size: 11px; font-variant-numeric: tabular-nums; }
 .share-name { font-size: 14px; font-weight: 500; color: ${mix(85)}; overflow-wrap: anywhere; }
 .share-handle { font-size: 12px; color: ${mix(60)}; overflow-wrap: anywhere; }
 .share-post { padding: 12px 0 16px; }
 .share-body .share-image { display: block; max-width: 100%; height: auto; margin: 8px 0; border-radius: 6px; }
-.share-body .share-emoji { display: inline; width: 1.25em; height: 1.25em; margin: 0 1px; vertical-align: -0.25em; }
+.share-clip { position: relative; overflow: hidden; border-radius: 8px; }
+.share-clip::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 72px; background: linear-gradient(color-mix(in srgb, var(--card) 0%, transparent), var(--card)); }
+.share-more { margin-top: 10px; font-size: 12px; text-align: center; color: ${mix(55)}; }
 .share-body .share-missing { display: block; margin: 8px 0; padding: 10px; border-radius: 6px; background: ${mix(6)}; color: ${mix(50)}; font-size: 12px; text-align: center; }
 .share-body .share-quote { margin: 10px 0; padding: 8px 10px; border-left: 2px solid ${mix(20)}; border-radius: 0 6px 6px 0; background: ${mix(4)}; }
 .share-body .share-quote-title { margin-bottom: 4px; font-size: 12px; color: ${mix(60)}; }
@@ -647,12 +655,15 @@ function shareTime(value) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+// title 可以是文字或已内联 emoji 的节点；取不到标题时不显示这一行，不再写“当前话题”占位。
 function frame({ theme, title, badge, middle, foot }) {
   const colors = SHARE_THEMES[theme] || SHARE_THEMES.light;
+  const heading = title instanceof Node ? title.cloneNode(true) : clean(title).trim();
+  const titled = typeof heading === 'string' ? Boolean(heading) : Boolean(heading.textContent.trim() || heading.querySelector('img'));
   return element('div', { class: 'share-card', style: `--bg: ${colors.bg}; --card: ${colors.card}; --fg: ${colors.fg}; --accent: ${colors.accent};` }, [
     element('style', { text: shareStyles }),
     element('div', { class: 'share-head' }, [logo(), element('span', { class: 'share-brand', text: 'LINUX DO' }), ...(badge ? [badge] : [])]),
-    element('div', { class: 'share-title', text: clean(title) || '当前话题' }),
+    ...(titled ? [element('div', { class: 'share-title' }, [heading])] : []),
     ...middle,
     element('div', { class: 'share-rule' }),
     element('div', { class: 'share-foot' }, foot),
@@ -701,7 +712,7 @@ function postNodes(node, images) {
       const url = child.getAttribute('src') || '', emoji = has('emoji');
       if (has('avatar') || has('site-icon') || !url) continue;
       const kind = emoji ? 'emoji' : 'image';
-      if (kind === 'image' && images.filter(item => item.kind === 'image').length >= MAX_POST_IMAGES) { fragment.append(placeholder('[图片]')); continue; }
+      if (kind === 'image' && images.filter(item => item.kind === 'image').length >= MAX_POST_IMAGES) { fragment.append(element('span', { class: 'share-placeholder share-picture', text: '[图片]' })); continue; }
       const image = element('img', { class: emoji ? 'share-emoji' : 'share-image', alt: '' });
       images.push({ node: image, url, kind, alt: clean(child.getAttribute('alt') || child.getAttribute('title') || '') });
       fragment.append(image);
@@ -748,12 +759,13 @@ async function pool(tasks, size) {
   await Promise.all(Array.from({ length: Math.min(size, tasks.length) }, async () => { while (next < tasks.length) await tasks[next++](); }));
 }
 
+const parse = html => { const template = document.createElement('template'); template.innerHTML = String(html || ''); return template.content; };
 // post 为 /posts/{id}.json；fetchImage(url) 返回图片 Blob。加载失败的图片换成占位，不影响导出。
-async function preparePost(post, { fetchImage, onProgress = () => {} }) {
+// 该接口默认不带话题标题：title 传页面已知的标题，titleHtml 传页面标题的 HTML，其中的 emoji 与正文一起下载画进图里。
+async function preparePost(post, { fetchImage, onProgress = () => {}, title = '', titleHtml = '' }) {
   const images = [];
-  const template = document.createElement('template');
-  template.innerHTML = String(post.cooked || '');
-  const body = element('div', { class: 'share-body' }, [postNodes(template.content, images)]);
+  const heading = titleHtml ? element('span', {}, [postNodes(parse(titleHtml), images)]) : null;
+  const body = element('div', { class: 'share-body' }, [postNodes(parse(post.cooked), images)]);
   const emoji = new Map();
   let avatar = null, loaded = 0;
   const avatarUrl = typeof post.avatar_template === 'string' ? post.avatar_template.replace('{size}', '96') : '';
@@ -778,41 +790,62 @@ async function preparePost(post, { fetchImage, onProgress = () => {} }) {
   }));
   if (avatarUrl) tasks.push(() => step(async () => { avatar = await load(avatarUrl, 72); }));
   await pool(tasks, 4);
-  return { title: post.topic_title, topicId: post.topic_id, slug: post.topic_slug, postNumber: post.post_number,
+  const text = clean(post.topic_title || title).trim();
+  return { title: heading && (heading.textContent.trim() || heading.querySelector('img')) ? heading : text, topicId: post.topic_id, slug: post.topic_slug, postNumber: post.post_number,
     name: post.name, username: post.username, createdAt: Date.parse(post.created_at), avatar, body };
 }
 
-function postCard(post, theme) {
+// brief 来自 measurePost：只画开头 cut 像素的正文，底部渐隐并注明全文篇幅；版式参照 FluxDO，楼层号放在作者行右侧。
+function postCard(post, theme, brief = null) {
   const shown = clean(post.name || post.username || '匿名');
   const avatar = post.avatar ? element('img', { class: 'share-avatar', alt: '', src: post.avatar.src, width: '36', height: '36' })
     : element('div', { class: 'share-avatar fallback', text: Array.from(shown)[0]?.toUpperCase() || '?' });
   const number = Number(post.postNumber) || 1;
   const link = `https://linux.do/t/${encodeURIComponent(post.slug || 'topic')}/${post.topicId}/${number}`;
+  const body = post.body.cloneNode(true);
   return frame({ theme, title: post.title,
     middle: [
       element('div', { class: 'share-author' }, [avatar, element('div', { class: 'share-author-text' }, [
         element('div', { class: 'share-name', text: shown }),
         element('div', { class: 'share-handle', text: `@${clean(post.username || '匿名')} · ${shareTime(post.createdAt)}` }),
-      ])]),
+      ]), element('span', { class: 'share-floor', text: number === 1 ? '#1 楼主' : `#${number}` })]),
       element('div', { class: 'share-rule' }),
-      element('div', { class: 'share-post' }, [post.body.cloneNode(true)]),
+      element('div', { class: 'share-post' }, brief ? [element('div', { class: 'share-clip', style: `height: ${brief.cut}px` }, [body]), element('div', { class: 'share-more', text: brief.note })] : [body]),
     ],
-    foot: [
-      element('div', { class: 'share-foot-row' }, [element('span', { text: number === 1 ? '#1 · 楼主' : `#${number} 楼` })]),
-      element('div', { class: 'share-foot-row' }, [uiIcon('link'), element('span', { class: 'share-link', text: link })]),
-    ] });
+    foot: [element('div', { class: 'share-foot-row' }, [uiIcon('link'), element('span', { class: 'share-link', text: link })])] });
 }
 
-// 在隔离的影子根里排版取高度，再经 SVG foreignObject 画到 canvas，不加载任何外部资源。
-async function renderShareImage(card) {
+// 在隔离的影子根里排版，不加载任何外部资源。
+function mount(card) {
   const stage = document.createElement('div');
-  const shadow = stage.attachShadow({ mode: 'open' });
-  shadow.append(element('style', { text: ':host { all: initial; position: fixed; left: -10000px; top: 0; pointer-events: none; }' }), card);
+  stage.attachShadow({ mode: 'open' }).append(element('style', { text: ':host { all: initial; position: fixed; left: -10000px; top: 0; pointer-events: none; }' }), card);
   document.body.append(stage);
+  return stage;
+}
+
+// 正文不超过 LONG_POST 时返回 null。超过时在 BRIEF_POST 附近找最近的元素底边截断，
+// 落在段落、图片或一行的结尾，避免切在图片中间；附近没有合适位置才按固定高度截。
+function measurePost(post) {
+  const card = postCard(post, 'light'), stage = mount(card);
+  try {
+    const body = card.querySelector('.share-post > .share-body'), box = body.getBoundingClientRect();
+    if (box.height <= LONG_POST) return null;
+    const ends = [...body.querySelectorAll('*')].map(node => Math.ceil(node.getBoundingClientRect().bottom - box.top))
+      .filter(end => Math.abs(end - BRIEF_POST) <= CUT_RANGE).sort((a, b) => Math.abs(a - BRIEF_POST) - Math.abs(b - BRIEF_POST));
+    const chars = body.textContent.replace(/\s+/g, '').length;
+    const pictures = body.querySelectorAll('.share-image, .share-missing, .share-picture').length;
+    return { cut: ends[0] ?? BRIEF_POST, height: Math.ceil(box.height),
+      note: `仅展示开头 · 全文约 ${chars.toLocaleString('zh-CN')} 字${pictures ? `、${pictures} 张图` : ''}` };
+  } finally { stage.remove(); }
+}
+
+// 经 SVG foreignObject 画到 canvas。超出单张画布上限时抛出 code 为 too-tall 的错误，由调用方给出提示。
+async function renderShareImage(card) {
+  const stage = mount(card);
   try {
     const width = Math.ceil(card.getBoundingClientRect().width), height = Math.ceil(card.getBoundingClientRect().height);
     const scale = Math.min(SCALE, MAX_CANVAS / height);
-    if (scale < 1) throw new Error('对话太长，无法生成一张图片。请新建对话后分开导出。');
+    if (scale < 1) throw Object.assign(new Error('内容太长，无法生成一张图片。'), { code: 'too-tall' });
     const markup = new XMLSerializer().serializeToString(card);
     const svg = `<svg xmlns="${SVG}" width="${width}" height="${height}"><foreignObject x="0" y="0" width="100%" height="100%">${markup}</foreignObject></svg>`;
     const image = new Image();
@@ -829,7 +862,7 @@ async function renderShareImage(card) {
 }
 
 
-const styles = ":host {\n  --ai-bg: var(--secondary, #fff);\n  --ai-text: var(--primary, #23252a);\n  --ai-muted: var(--primary-high, #5d6470);\n  --ai-line: var(--primary-low, #e2e4e8);\n  --ai-accent: var(--tertiary, #315ca8);\n  --ai-soft: color-mix(in srgb, var(--ai-text) 4%, var(--ai-bg));\n  --ai-raised: color-mix(in srgb, var(--ai-text) 6%, var(--ai-bg));\n  --ai-glass: color-mix(in srgb, var(--ai-raised) 78%, transparent);\n  --ai-hairline: color-mix(in srgb, var(--ai-text) 12%, transparent);\n  --ai-ease: cubic-bezier(.16, 1, .3, 1);\n  font: 14px/1.6 var(--font-family, -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif);\n  color: var(--ai-text);\n  -webkit-font-smoothing: antialiased;\n}\n* { box-sizing: border-box; }\n[hidden] { display: none !important; }\nbutton, input, textarea, select { font: inherit; color: inherit; }\nbutton, select { cursor: pointer; }\nbutton { min-height: 40px; border: 0; border-radius: 8px; padding: 8px 12px; background: var(--ai-soft); touch-action: manipulation; }\nbutton:disabled, select:disabled { cursor: default; opacity: .45; }\nbutton:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid var(--ai-accent); outline-offset: 2px; }\n@media (hover: hover) { button:not(:disabled):hover { background: color-mix(in srgb, var(--ai-text) 10%, var(--ai-bg)); } }\n.primary { background: var(--ai-accent); color: #fff; font-weight: 600; }\n@media (hover: hover) { .primary:not(:disabled):hover { background: color-mix(in srgb, var(--ai-accent) 88%, #000); } }\n.quiet { background: transparent; }\n.icon-button { display: inline-grid; place-items: center; flex: none; width: 40px; height: 40px; padding: 10px; }\n.ui-icon, .linuxdo-ai-icon { flex: none; width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }\n.ui-icon-more { stroke-width: 3.8; }\n.ui-icon-stop { width: 15px; height: 15px; fill: currentColor; stroke-width: 0; }\n.launcher { position: fixed; right: 22px; bottom: 22px; z-index: 1001; width: 40px; height: 40px; padding: 10px; border: 1px solid var(--ai-line); background: var(--ai-bg); display: grid; place-items: center; }\n/* 贴右下角，高度约为可用高度的三分之二；矮窗口至少 420px，且不超出可用高度。 */\n.panel { --ai-room: calc(100dvh - max(12px, env(safe-area-inset-top)) - max(12px, env(safe-area-inset-bottom))); position: fixed; z-index: 1002; right: 12px; bottom: max(12px, env(safe-area-inset-bottom)); height: clamp(min(var(--ai-floor, 420px), var(--ai-room)), var(--ai-room) * var(--ai-ratio, 2 / 3), var(--ai-room)); width: var(--ai-width, 440px); max-width: calc(100vw - 24px); display: flex; flex-direction: column; background: var(--ai-bg); border: 1px solid var(--ai-line); border-radius: 14px; box-shadow: 0 8px 32px #0002; overflow: hidden; }\n.panel:focus-visible { outline: 1px solid var(--ai-line); outline-offset: 0; }\n.resize { position: absolute; z-index: 3; touch-action: none; }\n.resize-top { top: 0; left: 16px; right: 16px; height: 8px; cursor: ns-resize; }\n.resize-left { left: 0; top: 16px; bottom: 16px; width: 8px; cursor: ew-resize; }\n.resize-corner { left: 0; top: 0; width: 16px; height: 16px; cursor: nwse-resize; }\n/* 悬停、聚焦或拖动时才显示的细把手。 */\n.resize-top::after, .resize-left::after { content: ''; position: absolute; border-radius: 2px; background: var(--ai-muted); opacity: 0; }\n.resize-top::after { top: 3px; left: 50%; width: 32px; height: 3px; translate: -50% 0; }\n.resize-left::after { left: 3px; top: 50%; width: 3px; height: 32px; translate: 0 -50%; }\n.resize:hover::after, .resize:focus-visible::after, .panel[data-resizing] .resize::after { opacity: .5; }\n.resize:focus-visible { outline: none; }\n.resize:focus-visible::after { opacity: 1; background: var(--ai-accent); }\n.panel[data-resizing] { transition: none; user-select: none; }\n.head { padding: 8px 12px 4px 16px; flex: none; }\n.head-row, .actions, .composer-actions { display: flex; align-items: center; gap: 4px; }\n.head-row { justify-content: space-between; }\n.brand { display: flex; align-items: center; gap: 4px; }\n.brand strong { font-size: 15px; font-weight: 650; }\n.brand .icon-button { margin-left: -8px; }\n.status { flex: none; margin: 0; padding: 4px 18px 8px; font-size: 12px; color: var(--ai-muted); overflow-wrap: anywhere; }\n.status.error { color: var(--danger, #c74949); }\n.conversation { overflow-y: auto; overscroll-behavior: contain; flex: 1; padding: 10px 16px 8px; min-height: 0; scrollbar-gutter: stable; }\n.message { padding: 4px 0 14px; }\n.message-head { margin-bottom: 6px; font-size: 12px; line-height: 1.5; color: var(--ai-muted); overflow-wrap: anywhere; }\n.message-actions { gap: 0; margin: 2px 0 0 -8px; }\n.message-actions .icon-button { width: 32px; height: 32px; min-height: 32px; padding: 8px; color: var(--ai-muted); }\n.message-actions .ui-icon { width: 15px; height: 15px; }\n.message[data-status=\"generating\"] .message-actions { visibility: hidden; }\n/* 历史回答的操作在悬停时出现；最新一条与触屏始终显示。 */\n@media (hover: hover) {\n  .message-actions { opacity: 0; transition: opacity .15s; }\n  .message:hover .message-actions, .message:last-child .message-actions, .message-actions:focus-within { opacity: 1; }\n}\n.message.user .body { background: var(--ai-soft); border-radius: 8px; padding: 9px 12px; white-space: pre-wrap; }\n.body { overflow-wrap: anywhere; line-height: 1.8; font-size: 14px; }\n.body:empty { display: none; }\n.body > :first-child { margin-top: 0; }\n.body > :last-child { margin-bottom: 0; }\n.body p { margin: 0 0 12px; }\n.body h2, .body h3, .body h4 { margin: 20px 0 9px; font-size: 15px; line-height: 1.6; font-weight: 650; }\n.body ul, .body ol { padding-left: 23px; margin: 10px 0 14px; }\n.body li { padding-left: 2px; margin-bottom: 5px; }\n.body li p { margin-bottom: 6px; }\n.body a { color: var(--ai-accent); text-underline-offset: 3px; }\n.body code { font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--ai-soft); padding: 2px 4px; border-radius: 4px; }\n.body pre { overflow: auto; padding: 12px; background: var(--ai-soft); border-radius: 8px; white-space: pre; }\n.body pre code { padding: 0; background: transparent; }\n.body blockquote { margin: 12px 0; padding: 10px 14px; background: var(--ai-soft); color: var(--ai-muted); border-radius: 6px; }\n.body hr { border: 0; border-top: 1px solid var(--ai-line); margin: 18px 0; }\n.table-scroll { overflow: auto; }\ntable { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 12px; }\ntd, th { border: 1px solid var(--ai-line); padding: 6px 8px; text-align: left; }\nth { background: var(--ai-soft); }\n/* 思考过程默认弱化显示，思考阶段限制高度并在框内跟随最新内容。 */\n.thinking { margin-bottom: 8px; }\n.thinking summary { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; border-radius: 6px; font-size: 12px; color: var(--ai-muted); cursor: pointer; list-style: none; user-select: none; }\n.thinking summary::-webkit-details-marker { display: none; }\n.thinking summary:focus-visible { outline: 2px solid var(--ai-accent); outline-offset: 2px; }\n@media (hover: hover) { .thinking summary:hover { color: var(--ai-text); } }\n.thinking summary .ui-icon { width: 13px; height: 13px; rotate: -90deg; }\n.thinking[open] summary .ui-icon { rotate: 0deg; }\n.thinking-text { margin: 4px 0 6px; padding-left: 12px; border-left: 2px solid var(--ai-line); font-size: 12px; line-height: 1.75; color: var(--ai-muted); white-space: pre-wrap; overflow-wrap: anywhere; }\n.message[data-thinking] .thinking-text { max-height: 220px; overflow-y: auto; }\n.message-note { font-size: 12px; margin-top: 8px; color: var(--ai-muted); overflow-wrap: anywhere; }\n.message-note:empty { display: none; }\n.message[data-status=\"error\"] .message-note { color: var(--danger, #c74949); }\n.composer { flex: none; padding: 0 16px 14px; }\n.composer-box { padding: 6px; border: 1px solid var(--ai-line); border-radius: 12px; background: var(--ai-soft); }\ntextarea, input { display: block; width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--ai-line); background: var(--ai-bg); }\ntextarea { min-height: 40px; max-height: 160px; padding: 9px 10px; resize: none; line-height: 1.6; border: 0; background: transparent; }\n.composer-box:has(textarea:focus-visible) { border-color: var(--ai-muted); }\ntextarea:focus-visible { outline: none; }\n.composer-actions { justify-content: space-between; padding: 10px 2px 2px; }\n.composer-tools { min-width: 0; gap: 0; }\n.scope-button, .effort-button, .refresh-action { display: flex; align-items: center; gap: 6px; padding: 8px; font-size: 12px; white-space: nowrap; }\n.scope-button, .effort-button { color: var(--ai-muted); }\n.scope-button .ui-icon, .effort-button .ui-icon { width: 13px; height: 13px; }\n.refresh-action .ui-icon { width: 15px; height: 15px; }\n.send-slot { display: grid; flex: none; border-radius: 8px; background: var(--ai-accent); color: #fff; }\n@media (hover: hover) { .send-slot:has(button:not(:disabled):hover) { background: color-mix(in srgb, var(--ai-accent) 88%, #000); } }\n.send-slot > .send-button { grid-area: 1 / 1; width: 40px; padding: 8px; background: transparent; }\n.send-button:disabled { opacity: 1; color: var(--ai-muted); background: color-mix(in srgb, var(--ai-text) 8%, var(--ai-bg)); }\n.typing { display: none; align-items: center; gap: 5px; height: 26px; }\n.message[data-status=\"generating\"]:has(.body:empty):has(.thinking[hidden]) .typing { display: flex; }\n.typing i { width: 5px; height: 5px; border-radius: 50%; background: var(--ai-muted); opacity: .35; }\n.latest { position: absolute; left: 50%; translate: -50% 0; bottom: calc(var(--ai-composer-height, 114px) + 10px); display: grid; place-items: center; width: 32px; height: 32px; min-height: 32px; padding: 0; border: 1px solid var(--ai-line); border-radius: 50%; color: var(--ai-muted); background: var(--ai-bg); box-shadow: 0 2px 8px #0002; }\n.latest .ui-icon { width: 16px; height: 16px; }\n.popover { position: absolute; z-index: 2; padding: 6px; background: var(--ai-raised); border: 1px solid var(--ai-line); border-radius: 10px; box-shadow: 0 8px 24px #0003; }\n/* 毛玻璃只用于小面积浮层：面积小、打开少，背后文字模糊后更易读。 */\n@supports (backdrop-filter: blur(1px)) {\n  .popover, .latest { border-color: transparent; background: var(--ai-glass); backdrop-filter: blur(16px) saturate(1.4); }\n  .popover { box-shadow: inset 0 0 0 1px var(--ai-hairline), 0 8px 24px #0003; }\n  .latest { box-shadow: inset 0 0 0 1px var(--ai-hairline), 0 2px 8px #0002; }\n}\n.more-popover { transform-origin: top right; top: 54px; right: 14px; width: 220px; max-height: calc(100% - 72px); overflow-y: auto; }\n.menu-item { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 40px; padding: 8px 10px; text-align: left; background: transparent; font-size: 13px; }\n.menu-item .ui-icon { width: 16px; height: 16px; }\n.menu-model { display: block; margin: 6px 4px 0; padding: 9px 6px 4px; border-top: 1px solid var(--ai-line); color: var(--ai-muted); font-size: 11px; overflow-wrap: anywhere; }\n.menu-model:empty { display: none; }\n.scope-popover, .effort-popover { transform-origin: bottom left; bottom: calc(var(--ai-composer-height, 114px) + 8px); max-height: calc(100% - var(--ai-composer-height, 114px) - 100px); overflow-y: auto; }\n.scope-popover { left: 16px; width: 212px; }\n.effort-popover { left: 128px; width: 168px; max-width: calc(100% - 144px); }\n.option-item { justify-content: space-between; }\n.option-item .ui-icon { visibility: hidden; }\n.option-item[aria-checked=\"true\"] { color: var(--ai-accent); }\n.option-item[aria-checked=\"true\"] .ui-icon { visibility: visible; }\n.menu-caption { display: block; padding: 5px 10px; font-size: 11px; color: var(--ai-muted); }\nselect { padding: 8px 10px; min-height: 40px; background: var(--ai-bg); border: 1px solid var(--ai-line); border-radius: 6px; max-width: 100%; }\n.scope-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 5px; padding: 5px 0 0 10px; border-top: 1px solid var(--ai-line); }\n/* 底栏文字与选项文字左对齐，更新按钮的文字与勾选图标右对齐。 */\n.scope-footer .refresh-action { padding-inline: 10px; }\n.context-count { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ai-muted); font-size: 11px; font-variant-numeric: tabular-nums; }\n.context-count[data-state=\"error\"] { color: var(--danger, #c74949); }\n.history { padding: 4px; }\n.history select { width: 100%; font-size: 12px; }\n/* 导出图片：上方预览实际生成的 PNG，下方选择背景并复制或保存。 */\n.exporter { flex: 1; min-height: 0; display: flex; flex-direction: column; }\n.export-preview { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 8px 16px 16px; }\n.export-preview canvas { display: block; width: min(100%, 375px); height: auto; margin: 0 auto; border-radius: 12px; box-shadow: 0 0 0 1px var(--ai-hairline), 0 4px 20px #0000001a; }\n.export-preview[aria-busy=\"true\"] canvas { opacity: .55; }\n.export-bar { flex: none; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 16px 14px; border-top: 1px solid var(--ai-line); }\n.export-themes { display: flex; gap: 2px; }\n.theme-option { display: flex; align-items: center; gap: 6px; padding: 8px 10px; font-size: 12px; color: var(--ai-muted); }\n.theme-option[aria-pressed=\"true\"] { color: var(--ai-text); background: var(--ai-soft); }\n.swatch { width: 14px; height: 14px; border-radius: 50%; box-shadow: inset 0 0 0 1px var(--ai-hairline); }\n.export-actions { gap: 6px; }\n.export-actions button { font-size: 13px; }\n.settings { flex: 1; overflow: auto; overscroll-behavior: contain; padding: 20px 16px; }\n.field { display: block; margin-bottom: 18px; }\n.field span { display: block; margin-bottom: 7px; font-size: 12px; }\n.field select { width: 100%; min-height: 40px; padding: 8px 12px; }\n.settings .actions { justify-content: flex-end; }\n.settings-actions { gap: 8px; }\n.test-result { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--ai-line); font-size: 12px; color: var(--ai-muted); overflow-wrap: anywhere; }\n.test-result[data-state=\"error\"] { color: var(--danger, #c74949); }\n.test-model { margin-bottom: 12px; color: var(--ai-text); }\n.test-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }\n.test-metrics span, .test-metrics strong { display: block; }\n.test-metrics strong { margin-top: 4px; color: var(--ai-text); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }\n.test-note { margin-top: 12px; font-size: 11px; }\n/* 动效按使用频率分级：只动 transform、opacity 和小元素的 filter。 */\n@media (prefers-reduced-motion: no-preference) {\n  button { transition: scale .12s var(--ai-ease), background-color .12s; }\n  button:not(:disabled):active { scale: .96; }\n  .menu-item:not(:disabled):active { scale: 1; background: color-mix(in srgb, var(--ai-text) 14%, var(--ai-bg)); }\n  .composer-box { transition: border-color .12s; }\n  .resize::after { transition: opacity .12s; }\n  .panel { transform-origin: right bottom; transition: opacity .22s var(--ai-ease), transform .22s var(--ai-ease); }\n  .panel[data-closing] { opacity: 0; transform: translateX(8px); pointer-events: none; transition-duration: .15s; transition-timing-function: ease-in; }\n  .popover { transition: opacity .14s var(--ai-ease), transform .14s var(--ai-ease); }\n  .latest { transition: opacity .16s var(--ai-ease), translate .16s var(--ai-ease), scale .12s var(--ai-ease); }\n  .send-slot > .send-button { transition: opacity .18s var(--ai-ease), scale .18s var(--ai-ease), filter .18s var(--ai-ease); }\n  @starting-style {\n    .panel { opacity: 0; transform: translateX(12px) scale(.985); }\n    .popover { opacity: 0; transform: scale(.97); }\n    .latest { opacity: 0; translate: -50% 6px; }\n    .send-slot > .send-button { opacity: 0; scale: .25; filter: blur(4px); }\n  }\n  .message.enter { animation: ai-rise .18s var(--ai-ease) both; }\n  .message.assistant.enter { animation-delay: .05s; }\n  .swap-in { animation: ai-swap .18s var(--ai-ease); }\n  .typing i { animation: ai-dot 1.2s ease-in-out infinite; }\n  .thinking summary .ui-icon { transition: rotate .15s var(--ai-ease); }\n  .message[data-thinking] .thinking summary span { animation: ai-breathe 1.6s ease-in-out infinite; }\n  .typing i:nth-child(2) { animation-delay: .15s; }\n  .typing i:nth-child(3) { animation-delay: .3s; }\n}\n/* 减弱动态效果：取消位移与缩放，只保留 100ms 淡入。 */\n@media (prefers-reduced-motion: reduce) {\n  .panel, .popover, .latest { transition: opacity .1s linear; }\n  @starting-style { .panel, .popover, .latest { opacity: 0; } }\n}\n[data-instant] { transition: none !important; }\n@keyframes ai-rise { from { opacity: 0; transform: translateY(6px); } }\n@keyframes ai-swap { from { opacity: 0; scale: .25; filter: blur(4px); } }\n@keyframes ai-dot { 0%, 80%, 100% { opacity: .35; } 40% { opacity: 1; } }\n@keyframes ai-breathe { 50% { opacity: .45; } }\n@media (max-width: 620px) {\n  .resize { display: none; }\n  .panel { inset: 0; height: auto; width: 100%; max-width: none; border-radius: 0; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }\n  .launcher { right: 14px; bottom: 18px; }\n}\n@media (max-height: 500px) {\n  .head { padding-block: 4px 8px; }\n  .composer { padding-bottom: 8px; }\n}\n";
+const styles = ":host {\n  --ai-bg: var(--secondary, #fff);\n  --ai-text: var(--primary, #23252a);\n  --ai-muted: var(--primary-high, #5d6470);\n  --ai-line: var(--primary-low, #e2e4e8);\n  --ai-accent: var(--tertiary, #315ca8);\n  --ai-soft: color-mix(in srgb, var(--ai-text) 4%, var(--ai-bg));\n  --ai-raised: color-mix(in srgb, var(--ai-text) 6%, var(--ai-bg));\n  --ai-glass: color-mix(in srgb, var(--ai-raised) 78%, transparent);\n  --ai-hairline: color-mix(in srgb, var(--ai-text) 12%, transparent);\n  --ai-ease: cubic-bezier(.16, 1, .3, 1);\n  font: 14px/1.6 var(--font-family, -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif);\n  color: var(--ai-text);\n  -webkit-font-smoothing: antialiased;\n}\n* { box-sizing: border-box; }\n[hidden] { display: none !important; }\nbutton, input, textarea, select { font: inherit; color: inherit; }\nbutton, select { cursor: pointer; }\nbutton { min-height: 40px; border: 0; border-radius: 8px; padding: 8px 12px; background: var(--ai-soft); touch-action: manipulation; }\nbutton:disabled, select:disabled { cursor: default; opacity: .45; }\nbutton:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid var(--ai-accent); outline-offset: 2px; }\n@media (hover: hover) { button:not(:disabled):hover { background: color-mix(in srgb, var(--ai-text) 10%, var(--ai-bg)); } }\n.primary { background: var(--ai-accent); color: #fff; font-weight: 600; }\n@media (hover: hover) { .primary:not(:disabled):hover { background: color-mix(in srgb, var(--ai-accent) 88%, #000); } }\n.quiet { background: transparent; }\n.icon-button { display: inline-grid; place-items: center; flex: none; width: 40px; height: 40px; padding: 10px; }\n.ui-icon, .linuxdo-ai-icon { flex: none; width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }\n.ui-icon-more { stroke-width: 3.8; }\n.ui-icon-stop { width: 15px; height: 15px; fill: currentColor; stroke-width: 0; }\n.launcher { position: fixed; right: 22px; bottom: 22px; z-index: 1001; width: 40px; height: 40px; padding: 10px; border: 1px solid var(--ai-line); background: var(--ai-bg); display: grid; place-items: center; }\n/* 贴右下角，高度约为可用高度的三分之二；矮窗口至少 420px，且不超出可用高度。 */\n.panel { --ai-room: calc(100dvh - max(12px, env(safe-area-inset-top)) - max(12px, env(safe-area-inset-bottom))); position: fixed; z-index: 1002; right: 12px; bottom: max(12px, env(safe-area-inset-bottom)); height: clamp(min(var(--ai-floor, 420px), var(--ai-room)), var(--ai-room) * var(--ai-ratio, 2 / 3), var(--ai-room)); width: var(--ai-width, 440px); max-width: calc(100vw - 24px); display: flex; flex-direction: column; background: var(--ai-bg); border: 1px solid var(--ai-line); border-radius: 14px; box-shadow: 0 8px 32px #0002; overflow: hidden; }\n.panel:focus-visible { outline: 1px solid var(--ai-line); outline-offset: 0; }\n.resize { position: absolute; z-index: 3; touch-action: none; }\n.resize-top { top: 0; left: 16px; right: 16px; height: 8px; cursor: ns-resize; }\n.resize-left { left: 0; top: 16px; bottom: 16px; width: 8px; cursor: ew-resize; }\n.resize-corner { left: 0; top: 0; width: 16px; height: 16px; cursor: nwse-resize; }\n/* 悬停、聚焦或拖动时才显示的细把手。 */\n.resize-top::after, .resize-left::after { content: ''; position: absolute; border-radius: 2px; background: var(--ai-muted); opacity: 0; }\n.resize-top::after { top: 3px; left: 50%; width: 32px; height: 3px; translate: -50% 0; }\n.resize-left::after { left: 3px; top: 50%; width: 3px; height: 32px; translate: 0 -50%; }\n.resize:hover::after, .resize:focus-visible::after, .panel[data-resizing] .resize::after { opacity: .5; }\n.resize:focus-visible { outline: none; }\n.resize:focus-visible::after { opacity: 1; background: var(--ai-accent); }\n.panel[data-resizing] { transition: none; user-select: none; }\n.head { padding: 8px 12px 4px 16px; flex: none; }\n.head-row, .actions, .composer-actions { display: flex; align-items: center; gap: 4px; }\n.head-row { justify-content: space-between; }\n.brand { display: flex; align-items: center; gap: 4px; }\n.brand strong { font-size: 15px; font-weight: 650; }\n.brand .icon-button { margin-left: -8px; }\n.status { flex: none; margin: 0; padding: 4px 18px 8px; font-size: 12px; color: var(--ai-muted); overflow-wrap: anywhere; }\n.status.error { color: var(--danger, #c74949); }\n.conversation { overflow-y: auto; overscroll-behavior: contain; flex: 1; padding: 10px 16px 8px; min-height: 0; scrollbar-gutter: stable; }\n.message { padding: 4px 0 14px; }\n.message-head { margin-bottom: 6px; font-size: 12px; line-height: 1.5; color: var(--ai-muted); overflow-wrap: anywhere; }\n.message-actions { gap: 0; margin: 2px 0 0 -8px; }\n.message-actions .icon-button { width: 32px; height: 32px; min-height: 32px; padding: 8px; color: var(--ai-muted); }\n.message-actions .ui-icon { width: 15px; height: 15px; }\n.message[data-status=\"generating\"] .message-actions { visibility: hidden; }\n/* 历史回答的操作在悬停时出现；最新一条与触屏始终显示。 */\n@media (hover: hover) {\n  .message-actions { opacity: 0; transition: opacity .15s; }\n  .message:hover .message-actions, .message:last-child .message-actions, .message-actions:focus-within { opacity: 1; }\n}\n.message.user .body { background: var(--ai-soft); border-radius: 8px; padding: 9px 12px; white-space: pre-wrap; }\n.body { overflow-wrap: anywhere; line-height: 1.8; font-size: 14px; }\n.body:empty { display: none; }\n.body > :first-child { margin-top: 0; }\n.body > :last-child { margin-bottom: 0; }\n.body p { margin: 0 0 12px; }\n.body h2, .body h3, .body h4 { margin: 20px 0 9px; font-size: 15px; line-height: 1.6; font-weight: 650; }\n.body ul, .body ol { padding-left: 23px; margin: 10px 0 14px; }\n.body li { padding-left: 2px; margin-bottom: 5px; }\n.body li p { margin-bottom: 6px; }\n.body a { color: var(--ai-accent); text-underline-offset: 3px; }\n.body code { font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--ai-soft); padding: 2px 4px; border-radius: 4px; }\n.body pre { overflow: auto; padding: 12px; background: var(--ai-soft); border-radius: 8px; white-space: pre; }\n.body pre code { padding: 0; background: transparent; }\n.body blockquote { margin: 12px 0; padding: 10px 14px; background: var(--ai-soft); color: var(--ai-muted); border-radius: 6px; }\n.body hr { border: 0; border-top: 1px solid var(--ai-line); margin: 18px 0; }\n.table-scroll { overflow: auto; }\ntable { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 12px; }\ntd, th { border: 1px solid var(--ai-line); padding: 6px 8px; text-align: left; }\nth { background: var(--ai-soft); }\n/* 思考过程默认弱化显示，思考阶段限制高度并在框内跟随最新内容。 */\n.thinking { margin-bottom: 8px; }\n.thinking summary { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; border-radius: 6px; font-size: 12px; color: var(--ai-muted); cursor: pointer; list-style: none; user-select: none; }\n.thinking summary::-webkit-details-marker { display: none; }\n.thinking summary:focus-visible { outline: 2px solid var(--ai-accent); outline-offset: 2px; }\n@media (hover: hover) { .thinking summary:hover { color: var(--ai-text); } }\n.thinking summary .ui-icon { width: 13px; height: 13px; rotate: -90deg; }\n.thinking[open] summary .ui-icon { rotate: 0deg; }\n.thinking-text { margin: 4px 0 6px; padding-left: 12px; border-left: 2px solid var(--ai-line); font-size: 12px; line-height: 1.75; color: var(--ai-muted); white-space: pre-wrap; overflow-wrap: anywhere; }\n.message[data-thinking] .thinking-text { max-height: 220px; overflow-y: auto; }\n.message-note { font-size: 12px; margin-top: 8px; color: var(--ai-muted); overflow-wrap: anywhere; }\n.message-note:empty { display: none; }\n.message[data-status=\"error\"] .message-note { color: var(--danger, #c74949); }\n.composer { flex: none; padding: 0 16px 14px; }\n.composer-box { padding: 6px; border: 1px solid var(--ai-line); border-radius: 12px; background: var(--ai-soft); }\ntextarea, input { display: block; width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--ai-line); background: var(--ai-bg); }\ntextarea { min-height: 40px; max-height: 160px; padding: 9px 10px; resize: none; line-height: 1.6; border: 0; background: transparent; overflow-y: hidden; scrollbar-width: thin; }\n.composer-box:has(textarea:focus-visible) { border-color: var(--ai-muted); }\ntextarea:focus-visible { outline: none; }\n.composer-actions { justify-content: space-between; padding: 10px 2px 2px; }\n.composer-tools { min-width: 0; gap: 0; }\n.scope-button, .effort-button, .refresh-action { display: flex; align-items: center; gap: 6px; padding: 8px; font-size: 12px; white-space: nowrap; }\n.scope-button, .effort-button { color: var(--ai-muted); }\n.scope-button .ui-icon, .effort-button .ui-icon { width: 13px; height: 13px; }\n.refresh-action .ui-icon { width: 15px; height: 15px; }\n.send-slot { display: grid; flex: none; border-radius: 8px; background: var(--ai-accent); color: #fff; }\n@media (hover: hover) { .send-slot:has(button:not(:disabled):hover) { background: color-mix(in srgb, var(--ai-accent) 88%, #000); } }\n.send-slot > .send-button { grid-area: 1 / 1; width: 40px; padding: 8px; background: transparent; }\n.send-button:disabled { opacity: 1; color: var(--ai-muted); background: color-mix(in srgb, var(--ai-text) 8%, var(--ai-bg)); }\n.typing { display: none; align-items: center; gap: 5px; height: 26px; }\n.message[data-status=\"generating\"]:has(.body:empty):has(.thinking[hidden]) .typing { display: flex; }\n.typing i { width: 5px; height: 5px; border-radius: 50%; background: var(--ai-muted); opacity: .35; }\n.latest { position: absolute; left: 50%; translate: -50% 0; bottom: calc(var(--ai-composer-height, 114px) + 10px); display: grid; place-items: center; width: 32px; height: 32px; min-height: 32px; padding: 0; border: 1px solid var(--ai-line); border-radius: 50%; color: var(--ai-muted); background: var(--ai-bg); box-shadow: 0 2px 8px #0002; }\n.latest .ui-icon { width: 16px; height: 16px; }\n.popover { position: absolute; z-index: 2; padding: 6px; background: var(--ai-raised); border: 1px solid var(--ai-line); border-radius: 10px; box-shadow: 0 8px 24px #0003; }\n/* 毛玻璃只用于小面积浮层：面积小、打开少，背后文字模糊后更易读。 */\n@supports (backdrop-filter: blur(1px)) {\n  .popover, .latest { border-color: transparent; background: var(--ai-glass); backdrop-filter: blur(16px) saturate(1.4); }\n  .popover { box-shadow: inset 0 0 0 1px var(--ai-hairline), 0 8px 24px #0003; }\n  .latest { box-shadow: inset 0 0 0 1px var(--ai-hairline), 0 2px 8px #0002; }\n}\n.more-popover { transform-origin: top right; top: 54px; right: 14px; width: 220px; max-height: calc(100% - 72px); overflow-y: auto; }\n.menu-item { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 40px; padding: 8px 10px; text-align: left; background: transparent; font-size: 13px; }\n.menu-item .ui-icon { width: 16px; height: 16px; }\n.menu-model { display: block; margin: 6px 4px 0; padding: 9px 6px 4px; border-top: 1px solid var(--ai-line); color: var(--ai-muted); font-size: 11px; overflow-wrap: anywhere; }\n.menu-model:empty { display: none; }\n.scope-popover, .effort-popover { transform-origin: bottom left; bottom: calc(var(--ai-composer-height, 114px) + 8px); max-height: calc(100% - var(--ai-composer-height, 114px) - 100px); overflow-y: auto; }\n.scope-popover { left: 16px; width: 212px; }\n.effort-popover { left: 128px; width: 168px; max-width: calc(100% - 144px); }\n.option-item { justify-content: space-between; }\n.option-item .ui-icon { visibility: hidden; }\n.option-item[aria-checked=\"true\"] { color: var(--ai-accent); }\n.option-item[aria-checked=\"true\"] .ui-icon { visibility: visible; }\n.menu-caption { display: block; padding: 5px 10px; font-size: 11px; color: var(--ai-muted); }\nselect { padding: 8px 10px; min-height: 40px; background: var(--ai-bg); border: 1px solid var(--ai-line); border-radius: 6px; max-width: 100%; }\n.scope-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 5px; padding: 5px 0 0 10px; border-top: 1px solid var(--ai-line); }\n/* 底栏文字与选项文字左对齐，更新按钮的文字与勾选图标右对齐。 */\n.scope-footer .refresh-action { padding-inline: 10px; }\n.context-count { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ai-muted); font-size: 11px; font-variant-numeric: tabular-nums; }\n.context-count[data-state=\"error\"] { color: var(--danger, #c74949); }\n.history { padding: 4px; }\n.history select { width: 100%; font-size: 12px; }\n/* 导出图片：上方预览实际生成的 PNG，下方选择背景并复制或保存。 */\n.exporter { flex: 1; min-height: 0; display: flex; flex-direction: column; }\n.export-preview { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 8px 16px 16px; }\n.export-preview canvas { display: block; width: min(100%, 375px); height: auto; margin: 0 auto; border-radius: 12px; box-shadow: 0 0 0 1px var(--ai-hairline), 0 4px 20px #0000001a; }\n.export-preview[aria-busy=\"true\"] canvas { opacity: .55; }\n/* 长帖提示：说明当前只保留开头还是完整长图，并提供切换。 */\n.export-note { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 16px 8px; padding: 2px 2px 2px 12px; border-radius: 8px; background: var(--ai-soft); font-size: 12px; color: var(--ai-muted); }\n.export-note button { flex: none; min-height: 32px; padding: 6px 10px; font-size: 12px; color: var(--ai-accent); white-space: nowrap; }\n.export-bar { flex: none; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 16px 14px; border-top: 1px solid var(--ai-line); }\n.export-themes { display: flex; gap: 2px; }\n.theme-option { display: flex; align-items: center; gap: 6px; padding: 8px 10px; font-size: 12px; color: var(--ai-muted); }\n.theme-option[aria-pressed=\"true\"] { color: var(--ai-text); background: var(--ai-soft); }\n.swatch { width: 14px; height: 14px; border-radius: 50%; box-shadow: inset 0 0 0 1px var(--ai-hairline); }\n.export-actions { gap: 6px; }\n.export-actions button { font-size: 13px; }\n.settings { flex: 1; overflow: auto; overscroll-behavior: contain; padding: 20px 16px; }\n.field { display: block; margin-bottom: 18px; }\n.field span { display: block; margin-bottom: 7px; font-size: 12px; }\n.field select { width: 100%; min-height: 40px; padding: 8px 12px; }\n.settings .actions { justify-content: flex-end; }\n.settings-actions { gap: 8px; }\n.test-result { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--ai-line); font-size: 12px; color: var(--ai-muted); overflow-wrap: anywhere; }\n.test-result[data-state=\"error\"] { color: var(--danger, #c74949); }\n.test-model { margin-bottom: 12px; color: var(--ai-text); }\n.test-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }\n.test-metrics span, .test-metrics strong { display: block; }\n.test-metrics strong { margin-top: 4px; color: var(--ai-text); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }\n.test-note { margin-top: 12px; font-size: 11px; }\n/* 动效按使用频率分级：只动 transform、opacity 和小元素的 filter。 */\n@media (prefers-reduced-motion: no-preference) {\n  button { transition: scale .12s var(--ai-ease), background-color .12s; }\n  button:not(:disabled):active { scale: .96; }\n  .menu-item:not(:disabled):active { scale: 1; background: color-mix(in srgb, var(--ai-text) 14%, var(--ai-bg)); }\n  .composer-box { transition: border-color .12s; }\n  .resize::after { transition: opacity .12s; }\n  .panel { transform-origin: right bottom; transition: opacity .22s var(--ai-ease), transform .22s var(--ai-ease); }\n  .panel[data-closing] { opacity: 0; transform: translateX(8px); pointer-events: none; transition-duration: .15s; transition-timing-function: ease-in; }\n  .popover { transition: opacity .14s var(--ai-ease), transform .14s var(--ai-ease); }\n  .latest { transition: opacity .16s var(--ai-ease), translate .16s var(--ai-ease), scale .12s var(--ai-ease); }\n  .send-slot > .send-button { transition: opacity .18s var(--ai-ease), scale .18s var(--ai-ease), filter .18s var(--ai-ease); }\n  @starting-style {\n    .panel { opacity: 0; transform: translateX(12px) scale(.985); }\n    .popover { opacity: 0; transform: scale(.97); }\n    .latest { opacity: 0; translate: -50% 6px; }\n    .send-slot > .send-button { opacity: 0; scale: .25; filter: blur(4px); }\n  }\n  .message.enter { animation: ai-rise .18s var(--ai-ease) both; }\n  .message.assistant.enter { animation-delay: .05s; }\n  .swap-in { animation: ai-swap .18s var(--ai-ease); }\n  .typing i { animation: ai-dot 1.2s ease-in-out infinite; }\n  .thinking summary .ui-icon { transition: rotate .15s var(--ai-ease); }\n  .message[data-thinking] .thinking summary span { animation: ai-breathe 1.6s ease-in-out infinite; }\n  .typing i:nth-child(2) { animation-delay: .15s; }\n  .typing i:nth-child(3) { animation-delay: .3s; }\n}\n/* 减弱动态效果：取消位移与缩放，只保留 100ms 淡入。 */\n@media (prefers-reduced-motion: reduce) {\n  .panel, .popover, .latest { transition: opacity .1s linear; }\n  @starting-style { .panel, .popover, .latest { opacity: 0; } }\n}\n[data-instant] { transition: none !important; }\n@keyframes ai-rise { from { opacity: 0; transform: translateY(6px); } }\n@keyframes ai-swap { from { opacity: 0; scale: .25; filter: blur(4px); } }\n@keyframes ai-dot { 0%, 80%, 100% { opacity: .35; } 40% { opacity: 1; } }\n@keyframes ai-breathe { 50% { opacity: .45; } }\n@media (max-width: 620px) {\n  .resize { display: none; }\n  .panel { inset: 0; height: auto; width: 100%; max-width: none; border-radius: 0; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }\n  .launcher { right: 14px; bottom: 18px; }\n}\n@media (max-height: 500px) {\n  .head { padding-block: 4px 8px; }\n  .composer { padding-bottom: 8px; }\n}\n";
 
 
 
@@ -845,7 +878,7 @@ const clone = value => JSON.parse(JSON.stringify(value));
 const labels = { first: '仅首帖', '5': '前 5 帖', all: '全部帖子' };
 const state = { topicId: null, record: null, session: null, task: null, probe: null, read: null, config: {}, open: false, view: 'chat', popover: null };
 const nodes = new Map();
-let storageNotice = '', scheduled = false, timelineButton, lastTrigger, closeTimer;
+let storageNotice = '', scheduled = false, timelineButton, lastTrigger, closeTimer, chatScroll = null;
 const postMenus = new WeakMap(), revealedPostMenus = new WeakSet();
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
 
@@ -967,15 +1000,19 @@ const composer = element('form', { class: 'composer', onSubmit: event => { event
   ])]),
 ]);
 // source 为 null 时导出当前对话，为 { postId } 时导出该楼；post 缓存已内联图片的帖子，切换背景不重新下载。
-const shot = { theme: null, blob: null, token: 0, source: null, post: null, controller: null };
+// full 为 true 时长帖导出完整长图，默认只保留开头。
+const shot = { theme: null, blob: null, token: 0, source: null, post: null, controller: null, full: false };
 const exportPreview = element('div', { class: 'export-preview', 'aria-busy': 'false' });
+const lengthText = element('span');
+const lengthButton = element('button', { type: 'button', class: 'quiet', onClick: () => { shot.full = !shot.full; void drawExport(); } });
+const exportNote = element('div', { class: 'export-note', role: 'status', hidden: true }, [lengthText, lengthButton]);
 const exportThemes = Object.entries(SHARE_THEMES).map(([value, theme]) => element('button', {
   type: 'button', class: 'quiet theme-option', 'aria-pressed': 'false', 'data-value': value,
   onClick: () => { if (shot.theme !== value) { shot.theme = value; void drawExport(); } },
 }, [element('i', { class: 'swatch', style: `background: ${theme.bg}` }), element('span', { text: theme.label })]));
 const copyImageButton = element('button', { type: 'button', class: 'quiet', text: '复制图片', onClick: () => void copyExport() });
 const saveImageButton = element('button', { type: 'button', class: 'primary', text: '保存图片', onClick: saveExport });
-const exporter = element('section', { class: 'exporter', 'aria-label': '导出图片', hidden: true }, [exportPreview,
+const exporter = element('section', { class: 'exporter', 'aria-label': '导出图片', hidden: true }, [exportNote, exportPreview,
   element('div', { class: 'export-bar' }, [
     element('div', { class: 'export-themes', role: 'group', 'aria-label': '图片背景' }, exportThemes),
     element('div', { class: 'actions export-actions' }, [copyImageButton, saveImageButton]),
@@ -1189,7 +1226,10 @@ async function testModel() {
 
 function resizeComposer() {
   questionInput.style.height = 'auto';
-  questionInput.style.height = `${Math.min(160, Math.max(40, questionInput.scrollHeight))}px`;
+  const full = questionInput.scrollHeight;
+  questionInput.style.height = `${Math.min(160, Math.max(40, full))}px`;
+  // 高度取整会少零点几像素，Windows 会因此露出带箭头的滚动条；没撑到上限时内容已完整显示，不需要滚动。
+  questionInput.style.overflowY = full > 160 ? 'auto' : 'hidden';
   const height = composer.getBoundingClientRect().height;
   if (height) panel.style.setProperty('--ai-composer-height', `${height}px`);
 }
@@ -1237,6 +1277,8 @@ function setStatus(text, error = false) {
 function setView(view) {
   if (view !== 'chat' && state.task) return;
   if (view === 'export' && !shot.source && !exportMessages().length) return;
+  if (view !== 'chat') rememberScroll();
+  const returning = view === 'chat' && state.view !== 'chat';
   cancelProbe(); testResult.hidden = true; clearExport();
   if (view !== 'export') shot.source = null;
   state.view = view;
@@ -1257,20 +1299,21 @@ function setView(view) {
     endpointInput.value = state.config.endpoint || ''; keyInput.value = state.config.key || ''; modelInput.value = state.config.model || '';
     deepseekModel.value = DEEPSEEK.models.includes(state.config.model) ? state.config.model : state.config.model && savedProvider() === 'deepseek' ? 'custom' : DEEPSEEK.models[0];
     showProviderFields(); keyInput.focus();
-  } else { keyInput.value = ''; if (state.open) questionInput.focus(); resizeComposer(); scrollLatest(); }
+  } else { keyInput.value = ''; if (state.open) questionInput.focus(); resizeComposer(); if (returning) restoreScroll(); }
 }
 function openPanel(instant = false) {
   if (!state.topicId) return;
-  const closing = panel.hasAttribute('data-closing');
+  const closing = panel.hasAttribute('data-closing'), reopening = !state.open;
   clearTimeout(closeTimer); panel.removeAttribute('data-closing'); panel.toggleAttribute('data-instant', instant);
   lastTrigger = document.activeElement; state.open = true; panel.hidden = false; launcher.hidden = true;
   if (closing && state.view !== 'chat') setView('chat');
   timelineButton?.setAttribute('aria-expanded', 'true'); launcher.setAttribute('aria-expanded', 'true');
-  applyLayout(); refreshControls(); resizeComposer(); scrollLatest(); panel.focus();
+  applyLayout(); refreshControls(); resizeComposer(); if (reopening) restoreScroll(); panel.focus();
 }
 // 点击关闭时淡出 150ms；Esc、键盘操作和减弱动态效果时立即隐藏。
 // 关闭只隐藏面板，读取和生成在后台继续，重新打开即可看到进度；需要中断时用停止按钮。
 function closePanel({ instant = false } = {}) {
+  rememberScroll();
   cancelProbe(); state.open = false; keyInput.value = '';
   closePopover();
   const finish = () => {
@@ -1288,9 +1331,17 @@ function activate(event) {
   openPanel(event?.detail === 0);
   if (state.topicId && state.read?.topicId !== state.topicId) readTopic();
 }
-// 生成过程中不自动滚动；只在打开、切换对话或点击按钮时跳到最新。
+// 生成过程中不自动滚动；只在切换话题、切换对话或点击按钮时跳到最新。
 function scrollLatest() {
   conversation.scrollTop = conversation.scrollHeight; updateLatest();
+}
+// 面板隐藏后浏览器会丢掉滚动位置：关闭面板或切到设置、导出前记下，回到同一对话时恢复，其余情况跳到最新。
+function rememberScroll() {
+  if (state.open && state.view === 'chat' && state.session && conversation.clientHeight) chatScroll = { sessionId: state.session.id, top: conversation.scrollTop };
+}
+function restoreScroll() {
+  if (chatScroll && chatScroll.sessionId === state.session?.id) { conversation.scrollTop = chatScroll.top; updateLatest(); }
+  else scrollLatest();
 }
 function updateLatest() {
   latestButton.hidden = !state.open || state.view !== 'chat' || conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight < 24;
@@ -1436,8 +1487,17 @@ function pageIsDark() {
   return r * 0.299 + g * 0.587 + b * 0.114 < 128;
 }
 function clearExport() {
-  shot.token++; shot.blob = null; shot.post = null; shot.controller?.abort(); shot.controller = null;
-  exportPreview.replaceChildren(); exportPreview.setAttribute('aria-busy', 'false');
+  shot.token++; shot.blob = null; shot.post = null; shot.full = false; shot.controller?.abort(); shot.controller = null;
+  exportPreview.replaceChildren(); exportPreview.setAttribute('aria-busy', 'false'); exportNote.hidden = true;
+}
+// 只有长帖显示：默认只保留开头，可改为完整长图；完整长图超出单张图片上限时不再提供切换。
+function showLength() {
+  const post = shot.source ? shot.post : null;
+  exportNote.hidden = !post?.brief;
+  if (exportNote.hidden) return;
+  lengthButton.hidden = post.tooTall;
+  lengthText.textContent = post.tooTall ? '帖子超出单张图片的长度上限，只能保留开头。' : shot.full ? '完整长图很长，部分应用会压缩显示。' : '帖子较长，图片只保留开头。';
+  lengthButton.textContent = shot.full ? '只保留开头' : '导出完整长图';
 }
 // 同站或带 CORS 的图片直接读取；其余经 GM_xmlhttpRequest（首次访问新域名时油猴会询问是否允许）。
 async function fetchImage(url, signal) {
@@ -1467,7 +1527,10 @@ async function loadPost(postId, signal) {
   setStatus('正在读取帖子…');
   const json = await getJson(`/posts/${postId}.json`, signal);
   if (String(json.topic_id) !== String(state.topicId)) throw new Error('这一楼不属于当前话题，请刷新页面后重试。');
-  const post = await preparePost(json, { fetchImage: url => fetchImage(url, signal),
+  // 单帖接口不带话题标题，取页面标题；标题里的 emoji 与正文图片一起画进图里。
+  const heading = document.querySelector(`#topic-title h1[data-topic-id="${CSS.escape(state.topicId)}"] .fancy-title`);
+  const read = state.read?.topicId === state.topicId ? state.read.data : null;
+  const post = await preparePost(json, { fetchImage: url => fetchImage(url, signal), title: state.record?.title || read?.title || '', titleHtml: heading?.innerHTML || '',
     onProgress: (loaded, total) => { if (!signal.aborted) setStatus(`正在加载图片 ${loaded}/${total}…`); } });
   checkAbort(signal);
   setStatus('');
@@ -1479,7 +1542,10 @@ async function exportCard() {
       shot.controller = new AbortController();
       shot.post = { postId: shot.source.postId, ready: loadPost(shot.source.postId, shot.controller.signal) };
     }
-    return postCard(await shot.post.ready, shot.theme);
+    const post = await shot.post.ready;
+    if (!('brief' in shot.post)) shot.post.brief = measurePost(post);
+    showLength();
+    return postCard(post, shot.theme, shot.full ? null : shot.post.brief);
   }
   const messages = exportMessages();
   return shareCard({ title: state.record?.title, topicId: state.topicId, theme: shot.theme, time: shareTime(messages.at(-1)?.createdAt),
@@ -1499,7 +1565,10 @@ async function drawExport() {
     exportPreview.replaceChildren(canvas); shot.blob = blob;
     copyImageButton.disabled = saveImageButton.disabled = false;
   } catch (error) {
-    if (token === shot.token && error.name !== 'AbortError') setStatus(error.message || '图片生成失败，请重试。', true);
+    if (token !== shot.token || error.name === 'AbortError') return;
+    // 完整长图画不下时退回只保留开头。
+    if (error.code === 'too-tall' && shot.source && shot.full && shot.post?.brief) { shot.post.tooTall = true; shot.full = false; void drawExport(); return; }
+    setStatus(error.code === 'too-tall' && !shot.source ? '对话太长，无法生成一张图片。请新建对话后分开导出。' : error.message || '图片生成失败，请重试。', true);
   } finally { if (token === shot.token) exportPreview.setAttribute('aria-busy', 'false'); }
 }
 async function copyExport() {
@@ -1599,7 +1668,8 @@ async function send(rawQuestion, replaceLast = false) {
     const ask = { id: uuid(), role: 'user', content: question, status: 'complete', createdAt: Date.now() };
     answer = { id: uuid(), role: 'assistant', content: '', status: 'generating', model: config.model, createdAt: Date.now() };
     task.session.messages.push(ask, answer); questionInput.value = ''; resizeComposer(); renderMessages(); refreshControls(); persist(task.record, task.topicId);
-    pinQuestion(nodes.get(ask.id).article, nodes.get(answer.id).article);
+    // 面板关着时问题没法置顶，重新打开改为跳到最新，看到这次的问题。
+    pinQuestion(nodes.get(ask.id).article, nodes.get(answer.id).article); chatScroll = null;
     // 定位完成后再加入场动画，避免位移影响置顶计算。
     for (const id of [ask.id, answer.id]) nodes.get(id).article.classList.add('enter');
     setStatus(`已读取 ${context.count}/${context.total} 帖，正在生成…`);
@@ -1718,7 +1788,7 @@ function reconcile() {
     resetPostMenus();
     state.task?.controller.abort(); state.read?.controller.abort(); cancelProbe(); testResult.hidden = true; state.task = null; state.read = null; state.topicId = id;
     if (state.view === 'export') setView('chat');
-    questionInput.value = ''; resizeComposer(); closePopover(); nodes.clear();
+    questionInput.value = ''; resizeComposer(); closePopover(); nodes.clear(); chatScroll = null;
     if (id) {
       state.record = loadRecord(id); state.session = state.record.sessions.find(s => s.id === state.record.activeId);
       renderMessages(); scrollLatest(); refreshControls(); setStatus('');
