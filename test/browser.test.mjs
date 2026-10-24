@@ -135,7 +135,9 @@ test('更多菜单与范围浮层可用，Esc 和点击外部只关闭浮层', a
   await chooseScope(page, 'all');
   assert.equal(await page.locator('#linuxdo-ai-root .scope-button').innerText(), '全部帖子');
   assert.equal(await page.evaluate(() => fixture.requests.length + fixture.calls.length), 0);
-  await page.evaluate(() => GM_setValue('linuxdo-ai:v1:topic:1002', { version: 1, title: '旧对话', activeId: 'old', sessions: [{ id: 'old', createdAt: 1, scope: '20', messages: [] }] }));
+  // 已有问答的旧对话保留自己的范围，旧版的“前 20 帖”回到前 5 帖。
+  await page.evaluate(() => GM_setValue('linuxdo-ai:v1:topic:1002', { version: 1, title: '旧对话', activeId: 'old', sessions: [{ id: 'old', createdAt: 1, scope: '20', messages: [
+    { id: 'old-question', role: 'user', content: '旧问题', status: 'complete' }, { id: 'old-answer', role: 'assistant', content: '旧回答', status: 'complete', model: '测试模型' }] }] }));
   await page.getByRole('button', { name: '话题二', exact: true }).click();
   await page.locator('#linuxdo-ai-root .scope-button', { hasText: '前 5 帖' }).waitFor();
 });
@@ -632,6 +634,44 @@ test('关闭再打开面板、从设置或导出页返回时停在原来的阅�
   await page.getByRole('button', { name: '话题一', exact: true }).click();
   await page.locator('#linuxdo-ai-topic-button').click();
   assert.ok(Math.abs(await top() - latest) <= 1, '切换话题后从最新开始');
+});
+
+test('新话题沿用上次的范围、思考强度和图片背景，刷新后仍保留，已有问答的对话保留原范围', async t => {
+  const page = await setup(t, undefined, { settings: false });
+  const scope = page.locator('#linuxdo-ai-root .scope-button'), effort = page.locator('#linuxdo-ai-root .effort-button');
+  const pressed = () => page.locator('#linuxdo-ai-root .theme-option[aria-pressed="true"]').innerText();
+  const exportFirst = async () => {
+    await page.locator('main .linuxdo-ai-post-export').first().click();
+    await page.locator('#linuxdo-ai-root .export-preview[aria-busy="false"] canvas').waitFor();
+  };
+  assert.equal(await scope.innerText(), '前 5 帖');
+  await chooseScope(page, 'all');
+  await page.getByRole('button', { name: '选择思考强度', exact: true }).click();
+  await page.getByRole('menuitemradio', { name: '低', exact: true }).click();
+  await exportFirst();
+  assert.equal(await pressed(), '浅色', '没选过时跟随论坛的浅色主题');
+  await page.getByRole('button', { name: '深色', exact: true }).click();
+  await page.locator('#linuxdo-ai-root .export-preview[aria-busy="false"] canvas[aria-label*="深色"]').waitFor();
+  await page.getByRole('button', { name: '返回对话', exact: true }).click();
+  await page.getByRole('button', { name: '话题二', exact: true }).click();
+  await page.locator('#linuxdo-ai-root .brand strong[title*="第二个测试话题"]').waitFor({ state: 'attached' });
+  assert.equal(await scope.innerText(), '全部帖子', '新话题沿用上次的范围');
+  assert.equal(await effort.innerText(), '思考 · 低');
+  await page.evaluate(() => GM_setValue('linuxdo-ai:v1:topic:1002', { version: 1, title: '有问答', activeId: 'kept', sessions: [{ id: 'kept', createdAt: 1, scope: 'first', messages: [
+    { id: 'kept-question', role: 'user', content: '旧问题', status: 'complete' }, { id: 'kept-answer', role: 'assistant', content: '旧回答', status: 'complete', model: '测试模型' }] }] }));
+  await page.getByRole('button', { name: '话题一', exact: true }).click();
+  await page.reload();
+  await page.locator('#linuxdo-ai-topic-button').click();
+  await scope.filter({ hasText: '全部帖子' }).waitFor();
+  assert.equal(await effort.innerText(), '思考 · 低', '刷新后仍保留');
+  await exportFirst();
+  assert.equal(await pressed(), '深色', '导出图片沿用上次的深色背景');
+  await page.getByRole('button', { name: '返回对话', exact: true }).click();
+  await page.getByRole('button', { name: '话题二', exact: true }).click();
+  await scope.filter({ hasText: '仅首帖' }).waitFor();
+  await page.getByRole('button', { name: '更多操作', exact: true }).click();
+  await page.getByRole('button', { name: '新对话', exact: true }).click();
+  assert.equal(await scope.innerText(), '全部帖子', '新对话沿用上次的范围');
 });
 
 test('论坛验证和模型网络错误不会触发自动重试', async t => {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linux.do AI 阅读助手
 // @namespace    sure.linuxdo.ai
-// @version      0.1.16
+// @version      0.1.17
 // @description  自选模型，流式总结、连续追问、上下文范围和本地历史。适用于 Chrome 标签页与 PWA。
 // @author       Sure
 // @homepageURL  https://github.com/Sure-Will/linuxdo-ai-assistant
@@ -871,6 +871,8 @@ const styles = ":host {\n  --ai-bg: var(--secondary, #fff);\n  --ai-text: var(--
 const PREFIX = 'linuxdo-ai:v1:';
 const CONFIG_KEY = `${PREFIX}config`;
 const LAYOUT_KEY = `${PREFIX}layout`;
+// 上次使用的阅读范围与导出图片背景，新话题和新对话沿用；思考强度保存在模型配置里，本来就全局生效。
+const PREFS_KEY = `${PREFIX}prefs`;
 const SIZE = { minHeight: 320, minWidth: 360, maxWidth: 900, step: 24 };
 const DEEPSEEK = { endpoint: 'https://api.deepseek.com/chat/completions', models: ['deepseek-flash', 'deepseek-v4-pro'] };
 const uuid = () => crypto.randomUUID();
@@ -885,6 +887,18 @@ const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
 function readValue(key, fallback) {
   try { return GM_getValue(key, fallback); }
   catch { storageNotice = '无法读取本地设置，请检查油猴是否允许运行此脚本。'; return fallback; }
+}
+function readPrefs() {
+  const saved = readValue(PREFS_KEY, {});
+  return saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {};
+}
+// 记不住只影响下次的默认值，不打断当前操作。
+function savePrefs(patch) {
+  try { GM_setValue(PREFS_KEY, { ...readPrefs(), ...patch }); } catch { /* 下次仍用默认值。 */ }
+}
+function lastScope() {
+  const { scope } = readPrefs();
+  return Object.hasOwn(SCOPES, scope) ? scope : '5';
 }
 const savedConfig = readValue(CONFIG_KEY, {});
 state.config = savedConfig && typeof savedConfig === 'object' && !Array.isArray(savedConfig) ? savedConfig : {};
@@ -932,7 +946,7 @@ const scopeOptions = ['first', '5', 'all'].map(value => element('button', {
   class: 'menu-item option-item', type: 'button', role: 'menuitemradio', 'aria-checked': 'false', 'data-value': value,
   onClick: () => {
     if (state.task || !state.session) return;
-    state.session.scope = value; persist(); refreshControls(); setStatus(''); closePopover(true);
+    state.session.scope = value; persist(); savePrefs({ scope: value }); refreshControls(); setStatus(''); closePopover(true);
   },
 }, [element('span', { text: labels[value] }), uiIcon('check')]));
 // 浮层保持打开，底栏直接显示读取进度。
@@ -941,7 +955,7 @@ const newButton = element('button', { class: 'menu-item', type: 'button', onClic
   if (!state.record || state.task) return;
   closePopover();
   if (!state.session.messages.length) { questionInput.focus(); return; }
-  const next = newSession(state.session.scope);
+  const next = newSession();
   state.record.sessions.unshift(next); state.record.activeId = next.id; state.session = next;
   questionInput.value = ''; resizeComposer(); persist(); renderMessages(); refreshControls(); setStatus(''); questionInput.focus();
 } }, [uiIcon('plus'), element('span', { text: '新对话' })]);
@@ -1008,7 +1022,7 @@ const lengthButton = element('button', { type: 'button', class: 'quiet', onClick
 const exportNote = element('div', { class: 'export-note', role: 'status', hidden: true }, [lengthText, lengthButton]);
 const exportThemes = Object.entries(SHARE_THEMES).map(([value, theme]) => element('button', {
   type: 'button', class: 'quiet theme-option', 'aria-pressed': 'false', 'data-value': value,
-  onClick: () => { if (shot.theme !== value) { shot.theme = value; void drawExport(); } },
+  onClick: () => { if (shot.theme !== value) { shot.theme = value; savePrefs({ shareTheme: value }); void drawExport(); } },
 }, [element('i', { class: 'swatch', style: `background: ${theme.bg}` }), element('span', { text: theme.label })]));
 const copyImageButton = element('button', { type: 'button', class: 'quiet', text: '复制图片', onClick: () => void copyExport() });
 const saveImageButton = element('button', { type: 'button', class: 'primary', text: '保存图片', onClick: saveExport });
@@ -1251,16 +1265,18 @@ function togglePopover(name, event) {
   (name === 'more' ? newButton : popover.querySelector('[aria-checked="true"]') || popover.querySelector('button:not([hidden])'))?.focus();
 }
 
-function newSession(scope = '5') { return { id: uuid(), createdAt: Date.now(), scope, messages: [] }; }
+function newSession(scope = lastScope()) { return { id: uuid(), createdAt: Date.now(), scope, messages: [] }; }
+// 还没提问的对话沿用上次的范围；已有问答的对话保留原范围，追问的上下文与之前的回答一致。
 function loadRecord(topicId) {
   const saved = readValue(`${PREFIX}topic:${topicId}`, null);
-  const sessions = Array.isArray(saved?.sessions) ? saved.sessions.filter(session => session?.id && Array.isArray(session.messages)).map(session => ({
-    ...session, createdAt: Number.isFinite(session.createdAt) ? session.createdAt : Date.now(), scope: Object.hasOwn(SCOPES, session.scope) ? session.scope : '5',
-    messages: session.messages.filter(m => ['user', 'assistant'].includes(m.role) && typeof m.content === 'string').map(m => ({
+  const sessions = Array.isArray(saved?.sessions) ? saved.sessions.filter(session => session?.id && Array.isArray(session.messages)).map(session => {
+    const messages = session.messages.filter(m => ['user', 'assistant'].includes(m.role) && typeof m.content === 'string').map(m => ({
       ...m, status: m.status === 'generating' ? 'stopped' : m.status,
       error: m.status === 'generating' ? '上次生成被中断，已保留当时收到的内容。' : m.error,
-    })),
-  })) : [];
+    }));
+    const scope = !messages.length ? lastScope() : Object.hasOwn(SCOPES, session.scope) ? session.scope : '5';
+    return { ...session, createdAt: Number.isFinite(session.createdAt) ? session.createdAt : Date.now(), scope, messages };
+  }) : [];
   if (!sessions.length) sessions.push(newSession());
   return { version: 1, title: typeof saved?.title === 'string' ? saved.title : '', sessions,
     activeId: sessions.some(s => s.id === saved?.activeId) ? saved.activeId : sessions[0].id };
@@ -1291,7 +1307,9 @@ function setView(view) {
   setStatus('');
   if (view === 'export') {
     keyInput.value = '';
-    shot.theme ||= pageIsDark() ? 'dark' : 'light';
+    // 用上次选的背景；从没选过时跟随论坛的明暗主题。
+    const saved = readPrefs().shareTheme;
+    shot.theme = Object.hasOwn(SHARE_THEMES, saved) ? saved : shot.theme || (pageIsDark() ? 'dark' : 'light');
     void drawExport();
     exportThemes.find(option => option.dataset.value === shot.theme)?.focus();
   } else if (view === 'settings') {
