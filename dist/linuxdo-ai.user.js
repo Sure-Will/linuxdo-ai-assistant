@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linux.do AI 阅读助手
 // @namespace    sure.linuxdo.ai
-// @version      0.1.17
+// @version      0.1.18
 // @description  自选模型，流式总结、连续追问、上下文范围和本地历史。适用于 Chrome 标签页与 PWA。
 // @author       Sure
 // @homepageURL  https://github.com/Sure-Will/linuxdo-ai-assistant
