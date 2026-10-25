@@ -1404,7 +1404,7 @@ function refreshControls() {
   const busy = Boolean(state.task);
   panel.setAttribute('aria-busy', String(busy));
   exportButton.disabled = busy || !exportMessages().length;
-  for (const control of [scopeButton, effortButton, moreButton, refreshButton, newButton, historyButton, historySelect, settingsButton, questionInput, ...scopeOptions, ...effortOptions]) control.disabled = busy;
+  for (const control of [scopeButton, effortButton, moreButton, refreshButton, newButton, historyButton, historySelect, settingsButton, ...scopeOptions, ...effortOptions]) control.disabled = busy;
   updateSendButton();
   for (const parts of nodes.values()) if (parts.retry) parts.retry.disabled = busy;
   stopButton.hidden = !busy; sendButton.hidden = busy;
@@ -1685,7 +1685,10 @@ async function send(rawQuestion, replaceLast = false) {
     if (replaceLast) task.session.messages.splice(-2);
     const ask = { id: uuid(), role: 'user', content: question, status: 'complete', createdAt: Date.now() };
     answer = { id: uuid(), role: 'assistant', content: '', status: 'generating', model: config.model, createdAt: Date.now() };
-    task.session.messages.push(ask, answer); questionInput.value = ''; resizeComposer(); renderMessages(); refreshControls(); persist(task.record, task.topicId);
+    // 生成中输入框保持可写，只清掉这次提交的问题，读取期间写下的新草稿留着。
+    task.session.messages.push(ask, answer);
+    if (questionInput.value.trim() === question) { questionInput.value = ''; resizeComposer(); }
+    renderMessages(); refreshControls(); persist(task.record, task.topicId);
     // 面板关着时问题没法置顶，重新打开改为跳到最新，看到这次的问题。
     pinQuestion(nodes.get(ask.id).article, nodes.get(answer.id).article); chatScroll = null;
     // 定位完成后再加入场动画，避免位移影响置顶计算。

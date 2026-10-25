@@ -312,6 +312,33 @@ test('生成中关闭面板不会中断，重新打开可看到完整回答', as
   assert.doesNotMatch(await page.locator('#linuxdo-ai-root .message-note').allTextContents().then(v => v.join('')), /停止/);
 });
 
+test('生成中可以写下一条问题，Enter 不发送，完成后再发；读取期间写的草稿不被清掉', async t => {
+  const page = await setup(t); await configure(page); await page.evaluate(() => fixture.setMode('slow'));
+  await summary(page).click(); await page.locator('#linuxdo-ai-root .assistant .body').filter({ hasText: '主要内容' }).waitFor();
+  assert.equal(await input(page).isEditable(), true, '生成中输入框可写');
+  await input(page).fill('下一个问题'); await input(page).press('Enter');
+  assert.equal(await input(page).inputValue(), '下一个问题', '生成中 Enter 不发送也不清空');
+  await done(page);
+  assert.equal(await page.evaluate(() => fixture.requests.length), 1);
+  assert.equal(await input(page).inputValue(), '下一个问题', '生成结束后草稿还在');
+  await page.evaluate(() => fixture.setMode('normal'));
+  await input(page).press('Enter'); await done(page);
+  assert.equal(await page.evaluate(() => fixture.requests.at(-1).payload.messages.at(-1).content), '下一个问题');
+  assert.equal(await input(page).inputValue(), '');
+
+  await page.getByRole('button', { name: '关闭 AI 面板', exact: true }).click();
+  await page.evaluate(() => fixture.setMode('slow-forum'));
+  await page.getByRole('button', { name: '话题二', exact: true }).click();
+  await page.locator('#linuxdo-ai-topic-button').click();
+  await chooseScope(page, 'all');
+  await input(page).fill('问题一'); await input(page).press('Enter');
+  await page.locator('#linuxdo-ai-root .panel[aria-busy="true"]').waitFor({ state: 'attached' });
+  await input(page).fill('读取中写的草稿');
+  await done(page);
+  assert.equal(await page.evaluate(() => fixture.requests.at(-1).payload.messages.at(-1).content), '问题一');
+  assert.equal(await input(page).inputValue(), '读取中写的草稿');
+});
+
 test('停止、重试、新对话和历史切换不会重复问题', async t => {
   const page = await setup(t); await configure(page); await page.evaluate(() => fixture.setMode('slow'));
   await summary(page).click(); await page.locator('#linuxdo-ai-root .assistant .body').filter({ hasText: '主要内容' }).waitFor();
